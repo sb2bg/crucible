@@ -123,7 +123,8 @@ impl UciEngine {
         btime: u64,
         winc: u64,
         binc: u64,
-    ) -> Result<String> {
+        timeout: Duration,
+    ) -> Result<Option<String>> {
         let moves_str = if moves.is_empty() {
             String::new()
         } else {
@@ -136,12 +137,16 @@ impl UciEngine {
             wtime, btime, winc, binc
         ))?;
 
-        // Wait for bestmove
-        self.wait_for("bestmove", Duration::from_secs(300))
+        self.wait_for_bestmove(timeout)
     }
 
     /// Search with a node limit
-    pub fn go_nodes(&mut self, position: &str, moves: &[String], nodes: u64) -> Result<String> {
+    pub fn go_nodes(
+        &mut self,
+        position: &str,
+        moves: &[String],
+        nodes: u64,
+    ) -> Result<Option<String>> {
         let moves_str = if moves.is_empty() {
             String::new()
         } else {
@@ -151,7 +156,7 @@ impl UciEngine {
         self.send_cmd(&format!("position {}{}", position, moves_str))?;
         self.send_cmd(&format!("go nodes {}", nodes))?;
 
-        self.wait_for("bestmove", Duration::from_secs(300))
+        self.wait_for_bestmove(Duration::from_secs(300))
     }
 
     /// Parse "bestmove e2e4 ponder d7d5" -> "e2e4"
@@ -181,6 +186,27 @@ impl UciEngine {
             matches!(bytes[4], b'q' | b'r' | b'b' | b'n')
         } else {
             true
+        }
+    }
+
+    fn wait_for_bestmove(&mut self, timeout: Duration) -> Result<Option<String>> {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let line = match self.stdout_rx.recv_timeout(remaining) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("Engine '{}' exited while waiting for 'bestmove'", self.name);
+                }
+            };
+            debug!("[{}] << {}", self.name, line);
+            if line.starts_with("bestmove") {
+                return Ok(Some(line));
+            }
         }
     }
 

@@ -3,15 +3,19 @@
 //! Supports concurrent games, opening books, and real-time
 //! SPRT evaluation to stop early when a result is conclusive.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
+use cozy_chess::{Board, GameStatus, Move};
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::engine::uci::UciEngine;
 use crate::sprt::{self, SprtBounds};
 use crate::types::*;
+
+const UCI_CLOCK_GRACE_MS: u64 = 1_000;
 
 /// Event emitted during a match for live updates
 #[derive(Debug, Clone)]
@@ -228,6 +232,9 @@ fn play_game_blocking(
     let mut btime = tc.base_time_ms;
     let mut move_count: u32 = 0;
     let max_moves = 500; // adjudication
+    let mut board = parse_opening_board(opening)?;
+    let mut seen_positions = HashMap::new();
+    record_position(&mut seen_positions, &board);
 
     let position = if opening == "startpos" {
         "startpos".to_string()
@@ -260,6 +267,7 @@ fn play_game_blocking(
                 btime,
                 tc.increment_ms,
                 tc.increment_ms,
+                per_move_timeout(remaining_before_move, tc.increment_ms),
             )?;
             let elapsed_ms = turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             if is_white_turn {
@@ -278,12 +286,27 @@ fn play_game_blocking(
             bestmove_line
         };
 
+        let Some(bestmove_line) = bestmove_line else {
+            let result = if is_white_turn {
+                GameResult::BlackWin
+            } else {
+                GameResult::WhiteWin
+            };
+            return Ok((result, pgn_moves, move_count));
+        };
+
         let bestmove = UciEngine::parse_bestmove(&bestmove_line);
 
         match bestmove {
             Some(mv) if mv != "(none)" && mv != "0000" => {
                 if !UciEngine::is_valid_move(&mv) {
                     bail!("engine returned invalid move '{}'", mv);
+                }
+                let parsed_move = mv
+                    .parse::<Move>()
+                    .map_err(|_| anyhow!("engine returned unparsable move '{}'", mv))?;
+                if !board.is_legal(parsed_move) {
+                    bail!("engine returned illegal move '{}'", mv);
                 }
                 if !pgn_moves.is_empty() {
                     pgn_moves.push(' ');
@@ -295,6 +318,7 @@ fn play_game_blocking(
 
                 moves.push(mv);
                 move_count += 1;
+                board.play(parsed_move);
 
                 // Apply increment after a completed move.
                 if tc.nodes.is_none() {
@@ -304,16 +328,98 @@ fn play_game_blocking(
                         btime += tc.increment_ms;
                     }
                 }
+
+                if record_position(&mut seen_positions, &board) >= 3 {
+                    return Ok((GameResult::Draw, pgn_moves, move_count));
+                }
+
+                match board.status() {
+                    GameStatus::Won => {
+                        let result = if is_white_turn {
+                            GameResult::WhiteWin
+                        } else {
+                            GameResult::BlackWin
+                        };
+                        return Ok((result, pgn_moves, move_count));
+                    }
+                    GameStatus::Drawn => {
+                        return Ok((GameResult::Draw, pgn_moves, move_count));
+                    }
+                    GameStatus::Ongoing => {}
+                }
             }
             _ => {
-                // Engine has no legal move or resigned
-                let result = if is_white_turn {
-                    GameResult::BlackWin
-                } else {
-                    GameResult::WhiteWin
-                };
-                return Ok((result, pgn_moves, move_count));
+                return Ok((
+                    resolve_no_move_result(&board, is_white_turn),
+                    pgn_moves,
+                    move_count,
+                ));
             }
         }
+    }
+}
+
+fn parse_opening_board(opening: &str) -> Result<Board> {
+    if opening == "startpos" {
+        Ok(Board::default())
+    } else {
+        opening
+            .parse::<Board>()
+            .map_err(|_| anyhow!("invalid opening FEN '{}'", opening))
+    }
+}
+
+fn per_move_timeout(remaining_ms: u64, increment_ms: u64) -> Duration {
+    Duration::from_millis(
+        remaining_ms
+            .saturating_add(increment_ms)
+            .saturating_add(UCI_CLOCK_GRACE_MS),
+    )
+}
+
+fn resolve_no_move_result(board: &Board, is_white_turn: bool) -> GameResult {
+    match board.status() {
+        GameStatus::Drawn => GameResult::Draw,
+        GameStatus::Won | GameStatus::Ongoing => {
+            if is_white_turn {
+                GameResult::BlackWin
+            } else {
+                GameResult::WhiteWin
+            }
+        }
+    }
+}
+
+fn record_position(seen_positions: &mut HashMap<u64, u8>, board: &Board) -> u8 {
+    let entry = seen_positions.entry(board.hash()).or_insert(0);
+    *entry = entry.saturating_add(1);
+    *entry1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_result_on_stalemate_is_draw() -> Result<()> {
+        let board = parse_opening_board("7k/5Q2/7K/8/8/8/8/8 b - - 0 1")?;
+        assert_eq!(resolve_no_move_result(&board, false), GameResult::Draw);
+        Ok(())
+    }
+
+    #[test]
+    fn none_result_on_checkmate_is_loss_for_side_to_move() -> Result<()> {
+        let board = parse_opening_board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")?;
+        assert_eq!(resolve_no_move_result(&board, false), GameResult::WhiteWin);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_positions_trigger_threefold_counter() {
+        let board = Board::default();
+        let mut seen_positions = HashMap::new();
+        assert_eq!(record_position(&mut seen_positions, &board), 1);
+        assert_eq!(record_position(&mut seen_positions, &board), 2);
+        assert_eq!(record_position(&mut seen_positions, &board), 3);
     }
 }

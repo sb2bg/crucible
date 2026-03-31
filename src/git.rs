@@ -163,12 +163,10 @@ impl GitManager {
 
         info!("Building commit {}...", short_hash(commit_hash));
 
-        // Run the build command
-        let parts: Vec<&str> = self.build_cmd.split_whitespace().collect();
-        let (cmd, args) = parts.split_first().context("Empty build command")?;
-
-        let output = Command::new(cmd)
-            .args(args)
+        // Build commands are configured as arbitrary shell snippets.
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(&self.build_cmd)
             .current_dir(&self.local_path)
             .output()
             .context("Failed to execute build command")?;

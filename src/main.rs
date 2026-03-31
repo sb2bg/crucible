@@ -127,11 +127,7 @@ async fn main() -> Result<()> {
 
         Commands::Run { tui } => {
             info!("Starting Crucible daemon...");
-
-            // Ensure data directory
-            std::fs::create_dir_all(&config.data_dir)?;
-            let db_path = config.data_dir.join("crucible.db");
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
 
             // Start web server
             let web_storage = storage.clone();
@@ -174,8 +170,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Monitor => {
-            let db_path = config.data_dir.join("crucible.db");
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
             let mut tui_app = crucible::tui::Tui::new(storage);
             tui_app.run()?;
         }
@@ -188,12 +183,14 @@ async fn main() -> Result<()> {
             branches,
             start_from,
         } => {
-            std::fs::create_dir_all(&config.data_dir)?;
-            let db_path = config.data_dir.join("crucible.db");
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
+            let existing = storage.get_engine_by_name(&name)?;
 
             let engine = crucible::types::Engine {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: existing
+                    .as_ref()
+                    .map(|engine| engine.id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 name: name.clone(),
                 repo_url: repo.clone(),
                 local_path: config.data_dir.join("repos").join(&name),
@@ -209,12 +206,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::List => {
-            let db_path = config.data_dir.join("crucible.db");
-            if !db_path.exists() {
-                println!("No engines tracked. Run `crucible add` first.");
-                return Ok(());
-            }
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
             let engines = storage.get_engines()?;
 
             if engines.is_empty() {
@@ -234,8 +226,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Bisect { engine, good, bad } => {
-            let db_path = config.data_dir.join("crucible.db");
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
             let engine = storage
                 .get_engine_by_name(&engine)?
                 .with_context(|| format!("Engine '{}' is not tracked", engine))?;
@@ -288,7 +279,7 @@ async fn main() -> Result<()> {
                         "Queued regression hunt for '{}' over {} commits.",
                         engine.name, remaining_range
                     );
-                    println!("First probe: {}", &commit_hash[..8.min(commit_hash.len())]);
+                    println!("First probe: {}", short_hash(&commit_hash));
                 }
                 Some(BisectStep::Found { culprit }) => {
                     println!(
@@ -306,8 +297,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Test { engine, dev, base } => {
-            let db_path = config.data_dir.join("crucible.db");
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
             let engine = storage
                 .get_engine_by_name(&engine)?
                 .with_context(|| format!("Engine '{}' is not tracked", engine))?;
@@ -333,20 +323,15 @@ async fn main() -> Result<()> {
 
             println!(
                 "Queued manual test: {} vs {} for '{}'",
-                &dev_revision.commit_hash[..8.min(dev_revision.commit_hash.len())],
-                &base_revision.commit_hash[..8.min(base_revision.commit_hash.len())],
+                short_hash(&dev_revision.commit_hash),
+                short_hash(&base_revision.commit_hash),
                 engine.name
             );
             println!("Job id: {}", job.id);
         }
 
         Commands::Status { engine: _ } => {
-            let db_path = config.data_dir.join("crucible.db");
-            if !db_path.exists() {
-                println!("No data yet. Run `crucible run` first.");
-                return Ok(());
-            }
-            let storage = Storage::open(&db_path)?;
+            let storage = open_storage(&config)?;
             let status = storage.get_system_status()?;
 
             println!("⚗  Crucible Status");
@@ -365,6 +350,7 @@ async fn main() -> Result<()> {
 /// The main continuous testing loop
 async fn run_test_loop(storage: Storage, config: Config) {
     info!("Test loop started");
+    let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
 
     loop {
         // 1. For each tracked engine, fetch latest commits
@@ -419,36 +405,98 @@ async fn run_test_loop(storage: Storage, config: Config) {
         }
 
         // 2. Process queued jobs
-        while let Ok(Some(job)) = storage.claim_next_job() {
-            info!(
-                "Running job {} (dev={}, base={})",
-                job.id, job.dev_revision_id, job.base_revision_id
-            );
-
-            match execute_job(&storage, &config, &job).await {
-                Ok(result) => {
-                    if let Err(err) = persist_job_result(&storage, &job, &result) {
-                        tracing::error!("Failed to persist job {}: {}", job.id, err);
-                        let _ = storage.set_job_status(&job.id, TestStatus::Failed);
-                        let _ = mark_bisect_session_failed(&storage, &job);
-                        continue;
-                    }
-
-                    if let Err(err) = advance_bisect_after_job(&storage, &config, &job, &result) {
-                        tracing::error!("Failed to advance bisect for job {}: {}", job.id, err);
-                        let _ = mark_bisect_session_failed(&storage, &job);
+        loop {
+            let mut batch = Vec::new();
+            while batch.len() < worker_count {
+                match storage.claim_next_job() {
+                    Ok(Some(job)) => batch.push(job),
+                    Ok(None) => break,
+                    Err(err) => {
+                        tracing::error!("Failed to claim next job: {}", err);
+                        break;
                     }
                 }
-                Err(err) => {
-                    tracing::error!("Job {} failed: {}", job.id, err);
-                    let _ = storage.set_job_status(&job.id, TestStatus::Failed);
-                    let _ = mark_bisect_session_failed(&storage, &job);
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let mut handles = Vec::with_capacity(batch.len());
+            for job in batch {
+                let job_storage = storage.clone();
+                let job_config = config.clone();
+                handles.push(tokio::spawn(async move {
+                    process_claimed_job(job_storage, job_config, job).await;
+                }));
+            }
+
+            for handle in handles {
+                if let Err(err) = handle.await {
+                    tracing::error!("Job worker task panicked: {}", err);
                 }
             }
         }
 
         // Sleep before next polling cycle
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
+fn open_storage(config: &Config) -> Result<Storage> {
+    std::fs::create_dir_all(&config.data_dir)?;
+    let db_path = config.data_dir.join("crucible.db");
+    let storage = Storage::open(&db_path)?;
+    sync_config_engines(&storage, config)?;
+    Ok(storage)
+}
+
+fn sync_config_engines(storage: &Storage, config: &Config) -> Result<()> {
+    for engine_cfg in &config.engines {
+        let existing = storage.get_engine_by_name(&engine_cfg.name)?;
+        let engine = Engine {
+            id: existing
+                .as_ref()
+                .map(|engine| engine.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            name: engine_cfg.name.clone(),
+            repo_url: engine_cfg.repo.clone(),
+            local_path: config.data_dir.join("repos").join(&engine_cfg.name),
+            branches: engine_cfg.branches.clone(),
+            build_cmd: engine_cfg.build_cmd.clone(),
+            binary_path: engine_cfg.binary_path.clone(),
+            start_from: engine_cfg.start_from.clone(),
+        };
+        storage.insert_engine(&engine)?;
+    }
+    Ok(())
+}
+
+async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
+    info!(
+        "Running job {} (dev={}, base={})",
+        job.id, job.dev_revision_id, job.base_revision_id
+    );
+
+    match execute_job(&storage, &config, &job).await {
+        Ok(result) => {
+            if let Err(err) = persist_job_result(&storage, &job, &result) {
+                tracing::error!("Failed to persist job {}: {}", job.id, err);
+                let _ = storage.set_job_status(&job.id, TestStatus::Failed);
+                let _ = mark_bisect_session_failed(&storage, &job);
+                return;
+            }
+
+            if let Err(err) = advance_bisect_after_job(&storage, &config, &job, &result) {
+                tracing::error!("Failed to advance bisect for job {}: {}", job.id, err);
+                let _ = mark_bisect_session_failed(&storage, &job);
+            }
+        }
+        Err(err) => {
+            tracing::error!("Job {} failed: {}", job.id, err);
+            let _ = storage.set_job_status(&job.id, TestStatus::Failed);
+            let _ = mark_bisect_session_failed(&storage, &job);
+        }
     }
 }
 

@@ -58,7 +58,7 @@ web_port = 8877
 web_host = "127.0.0.1"
 
 [testing]
-concurrency = 4           # Games to run in parallel
+concurrency = 4           # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance
@@ -81,6 +81,8 @@ build_cmd = "make"
 binary_path = "my-engine"
 start_from = "v1.0.0"
 ```
+
+Entries under `[[engines]]` are imported automatically when `crucible run` starts.
 
 ## Commands
 

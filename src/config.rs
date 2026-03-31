@@ -56,7 +56,7 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestingConfig {
-    /// Number of concurrent games to run
+    /// Number of test jobs to execute in parallel
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
     /// Default time control

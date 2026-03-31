@@ -84,6 +84,12 @@ impl Storage {
                 UNIQUE(engine_id, commit_hash)
             );
 
+            CREATE TABLE IF NOT EXISTS revision_branches (
+                revision_id TEXT NOT NULL REFERENCES revisions(id),
+                branch TEXT NOT NULL,
+                PRIMARY KEY (revision_id, branch)
+            );
+
             CREATE TABLE IF NOT EXISTS test_jobs (
                 id TEXT PRIMARY KEY,
                 engine_id TEXT NOT NULL REFERENCES engines(id),
@@ -137,6 +143,8 @@ impl Storage {
                 ON revisions(engine_id, commit_date);
             CREATE INDEX IF NOT EXISTS idx_revisions_hash
                 ON revisions(engine_id, commit_hash);
+            CREATE INDEX IF NOT EXISTS idx_revision_branches_branch
+                ON revision_branches(branch, revision_id);
             CREATE INDEX IF NOT EXISTS idx_jobs_status
                 ON test_jobs(status, priority DESC);
             CREATE INDEX IF NOT EXISTS idx_jobs_engine
@@ -153,6 +161,9 @@ impl Storage {
         self.ensure_bisect_column(&tx, "candidate_index", "INTEGER")?;
         tx.execute_batch(
             "
+            INSERT OR IGNORE INTO revision_branches (revision_id, branch)
+            SELECT id, branch FROM revisions;
+
             UPDATE revisions
             SET build_status = trim(build_status, '\"')
             WHERE build_status LIKE '\"%\"';
@@ -275,8 +286,9 @@ impl Storage {
     // ── Revision CRUD ────────────────────────────────────────────
 
     pub fn insert_revision(&self, rev: &EngineRevision) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT OR IGNORE INTO revisions (id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -292,6 +304,11 @@ impl Storage {
                 encode_build_status(rev.build_status),
             ],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO revision_branches (revision_id, branch) VALUES (?1, ?2)",
+            params![rev.id, rev.branch],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -319,6 +336,21 @@ impl Storage {
                     build_status: decode_build_status(&status_str)?,
                 })
             })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(revs)
+    }
+
+    pub fn get_branch_revisions_for_engine(&self, engine_id: &str) -> Result<Vec<EngineRevision>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.engine_id, r.commit_hash, r.commit_message, r.commit_date, rb.branch, r.tag, r.is_release, r.binary_path, r.build_status
+             FROM revisions r
+             JOIN revision_branches rb ON rb.revision_id = r.id
+             WHERE r.engine_id = ?1
+             ORDER BY r.commit_date ASC, rb.branch ASC",
+        )?;
+        let revs = stmt
+            .query_map(params![engine_id], map_revision_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(revs)
     }
@@ -764,11 +796,12 @@ impl Storage {
     ) -> Result<Vec<EloDataPoint>> {
         let conn = self.conn.lock().unwrap();
         let query = if branch.is_some() {
-            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
+            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, rb.branch, r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
+             JOIN revision_branches rb ON rb.revision_id = r.id
              JOIN test_jobs j ON j.dev_revision_id = r.id
-             WHERE r.engine_id = ?1 AND r.branch = ?2 AND j.status = 'Completed' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
+             WHERE r.engine_id = ?1 AND rb.branch = ?2 AND j.status = 'Completed' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         } else {
             "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
@@ -866,6 +899,24 @@ fn map_test_job_row(row: &Row<'_>) -> rusqlite::Result<TestJob> {
         started_at: parse_optional_timestamp_column(started_at, 10)?,
         completed_at: parse_optional_timestamp_column(completed_at, 11)?,
         result: None,
+    })
+}
+
+fn map_revision_row(row: &Row<'_>) -> rusqlite::Result<EngineRevision> {
+    let date_str: String = row.get(4)?;
+    let status_str: String = row.get(9)?;
+    let binary_str: Option<String> = row.get(8)?;
+    Ok(EngineRevision {
+        id: row.get(0)?,
+        engine_id: row.get(1)?,
+        commit_hash: row.get(2)?,
+        commit_message: row.get(3)?,
+        commit_date: parse_timestamp_column(&date_str, 4)?,
+        branch: row.get(5)?,
+        tag: row.get(6)?,
+        is_release: row.get::<_, i32>(7)? != 0,
+        binary_path: binary_str.map(std::path::PathBuf::from),
+        build_status: decode_build_status(&status_str)?,
     })
 }
 

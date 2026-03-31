@@ -39,7 +39,7 @@ impl Scheduler {
 
     /// Scan for new commits and create test jobs for them
     pub fn schedule_engine(&self, engine_id: &str) -> Result<Vec<TestJob>> {
-        let revisions = self.storage.get_revisions_for_engine(engine_id)?;
+        let revisions = self.storage.get_branch_revisions_for_engine(engine_id)?;
         if revisions.len() < 2 {
             return Ok(Vec::new());
         }
@@ -271,6 +271,36 @@ mod tests {
         let jobs = scheduler.schedule_engine(&engine.id)?;
 
         assert!(jobs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_shared_commit_membership_across_branches() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        storage.insert_engine(&engine)?;
+
+        let shared_main = test_revision(&engine.id, "main", "shared", 0);
+        let mut shared_dev = shared_main.clone();
+        shared_dev.branch = "dev".into();
+
+        let main_head = test_revision(&engine.id, "main", "main2", 1);
+        let dev_head = test_revision(&engine.id, "dev", "dev2", 2);
+
+        storage.insert_revision(&shared_main)?;
+        storage.insert_revision(&shared_dev)?;
+        storage.insert_revision(&main_head)?;
+        storage.insert_revision(&dev_head)?;
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert!(jobs.iter().any(
+            |job| job.dev_revision_id == main_head.id && job.base_revision_id == shared_main.id
+        ));
+        assert!(jobs.iter().any(
+            |job| job.dev_revision_id == dev_head.id && job.base_revision_id == shared_main.id
+        ));
         Ok(())
     }
 }

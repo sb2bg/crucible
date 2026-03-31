@@ -45,44 +45,58 @@ impl Scheduler {
         }
 
         let mut new_jobs = Vec::new();
+        let mut revisions_by_branch =
+            std::collections::BTreeMap::<String, Vec<EngineRevision>>::new();
+        for revision in revisions {
+            revisions_by_branch
+                .entry(revision.branch.clone())
+                .or_default()
+                .push(revision);
+        }
 
-        // Find revisions that don't have a test job yet
-        // For each untested revision, create a job testing it against its predecessor
-        for i in 1..revisions.len() {
-            let dev = &revisions[i];
-            let base = &revisions[i - 1];
+        for branch_revisions in revisions_by_branch.values_mut() {
+            branch_revisions.sort_by_key(|rev| rev.commit_date);
+            for pair in branch_revisions.windows(2) {
+                let base = &pair[0];
+                let dev = &pair[1];
 
-            // Skip if dev isn't built yet
-            if dev.build_status != BuildStatus::Success {
-                continue;
+                if dev.build_status != BuildStatus::Success
+                    || base.build_status != BuildStatus::Success
+                {
+                    continue;
+                }
+
+                if self
+                    .storage
+                    .has_test_job(engine_id, &dev.id, &base.id, JobType::Sequential)?
+                {
+                    continue;
+                }
+
+                let priority = self.compute_priority(dev, branch_revisions);
+                let tc = TimeControl {
+                    base_time_ms: self.config.testing.time_control.base_ms,
+                    increment_ms: self.config.testing.time_control.increment_ms,
+                    nodes: self.config.testing.time_control.nodes,
+                };
+
+                let job = TestJob {
+                    id: Uuid::new_v4().to_string(),
+                    engine_id: engine_id.to_string(),
+                    dev_revision_id: dev.id.clone(),
+                    base_revision_id: base.id.clone(),
+                    time_control: tc,
+                    opening_book: self.config.testing.opening_book.clone(),
+                    status: TestStatus::Queued,
+                    priority,
+                    created_at: Utc::now(),
+                    started_at: None,
+                    completed_at: None,
+                    result: None,
+                    job_type: JobType::Sequential,
+                };
+                new_jobs.push(job);
             }
-            if base.build_status != BuildStatus::Success {
-                continue;
-            }
-
-            let priority = self.compute_priority(dev, &revisions);
-            let tc = TimeControl {
-                base_time_ms: self.config.testing.time_control.base_ms,
-                increment_ms: self.config.testing.time_control.increment_ms,
-                nodes: self.config.testing.time_control.nodes,
-            };
-
-            let job = TestJob {
-                id: Uuid::new_v4().to_string(),
-                engine_id: engine_id.to_string(),
-                dev_revision_id: dev.id.clone(),
-                base_revision_id: base.id.clone(),
-                time_control: tc,
-                opening_book: self.config.testing.opening_book.clone(),
-                status: TestStatus::Queued,
-                priority,
-                created_at: Utc::now(),
-                started_at: None,
-                completed_at: None,
-                result: None,
-                job_type: JobType::Sequential,
-            };
-            new_jobs.push(job);
         }
 
         Ok(new_jobs)
@@ -154,6 +168,109 @@ impl Scheduler {
     /// (called when new commits are pushed to that branch)
     pub fn reprioritize_branch(&self, _engine_id: &str, _branch: &str) -> Result<()> {
         // TODO: Bump priority of HEAD commit jobs, demote older ones
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn test_engine() -> Engine {
+        Engine {
+            id: "engine-1".into(),
+            name: "engine".into(),
+            repo_url: "https://example.invalid/repo.git".into(),
+            local_path: std::path::PathBuf::from("/tmp/engine"),
+            branches: vec!["main".into(), "dev".into()],
+            build_cmd: "make".into(),
+            binary_path: "engine".into(),
+            start_from: None,
+        }
+    }
+
+    fn test_revision(
+        engine_id: &str,
+        branch: &str,
+        suffix: &str,
+        offset_days: i64,
+    ) -> EngineRevision {
+        EngineRevision {
+            id: format!("{}-{}", branch, suffix),
+            engine_id: engine_id.into(),
+            commit_hash: format!("{}{}", branch, suffix),
+            commit_message: format!("{} {}", branch, suffix),
+            commit_date: Utc::now() + Duration::days(offset_days),
+            branch: branch.into(),
+            tag: None,
+            is_release: false,
+            binary_path: Some(std::path::PathBuf::from(format!("/tmp/{}", suffix))),
+            build_status: BuildStatus::Success,
+        }
+    }
+
+    #[test]
+    fn schedules_adjacent_revisions_within_each_branch() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        storage.insert_engine(&engine)?;
+
+        let revisions = vec![
+            test_revision(&engine.id, "main", "a1", 0),
+            test_revision(&engine.id, "main", "a2", 1),
+            test_revision(&engine.id, "dev", "b1", 2),
+            test_revision(&engine.id, "dev", "b2", 3),
+        ];
+        for revision in &revisions {
+            storage.insert_revision(revision)?;
+        }
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs
+            .iter()
+            .any(|job| { job.dev_revision_id == "main-a2" && job.base_revision_id == "main-a1" }));
+        assert!(jobs
+            .iter()
+            .any(|job| { job.dev_revision_id == "dev-b2" && job.base_revision_id == "dev-b1" }));
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_schedule_duplicate_sequential_jobs() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        storage.insert_engine(&engine)?;
+
+        let base = test_revision(&engine.id, "main", "a1", 0);
+        let dev = test_revision(&engine.id, "main", "a2", 1);
+        storage.insert_revision(&base)?;
+        storage.insert_revision(&dev)?;
+
+        let existing_job = TestJob {
+            id: "job-1".into(),
+            engine_id: engine.id.clone(),
+            dev_revision_id: dev.id.clone(),
+            base_revision_id: base.id.clone(),
+            time_control: TimeControl::stc(),
+            opening_book: None,
+            status: TestStatus::Completed,
+            priority: priority::BACKFILL,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            job_type: JobType::Sequential,
+        };
+        storage.insert_test_job(&existing_job)?;
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert!(jobs.is_empty());
         Ok(())
     }
 }

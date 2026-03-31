@@ -4,7 +4,7 @@
 //! The database is the source of truth for the Elo timeline.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -164,6 +164,33 @@ impl Storage {
         Ok(engines)
     }
 
+    pub fn get_engine_by_name(&self, name: &str) -> Result<Option<Engine>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, repo_url, local_path, branches, build_cmd, binary_path, start_from
+             FROM engines WHERE name = ?1 LIMIT 1",
+        )?;
+
+        let engine = stmt
+            .query_row(params![name], |row| {
+                let branches_str: String = row.get(4)?;
+                let local_path_str: String = row.get(3)?;
+                Ok(Engine {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    repo_url: row.get(2)?,
+                    local_path: std::path::PathBuf::from(local_path_str),
+                    branches: serde_json::from_str(&branches_str).unwrap_or_default(),
+                    build_cmd: row.get(5)?,
+                    binary_path: row.get(6)?,
+                    start_from: row.get(7)?,
+                })
+            })
+            .optional()?;
+
+        Ok(engine)
+    }
+
     // ── Revision CRUD ────────────────────────────────────────────
 
     pub fn insert_revision(&self, rev: &EngineRevision) -> Result<()> {
@@ -217,6 +244,82 @@ impl Storage {
         Ok(revs)
     }
 
+    pub fn get_revision_by_id(&self, revision_id: &str) -> Result<Option<EngineRevision>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+             FROM revisions WHERE id = ?1 LIMIT 1",
+        )?;
+
+        let revision = stmt
+            .query_row(params![revision_id], |row| {
+                let date_str: String = row.get(4)?;
+                let status_str: String = row.get(9)?;
+                let binary_str: Option<String> = row.get(8)?;
+                Ok(EngineRevision {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    commit_hash: row.get(2)?,
+                    commit_message: row.get(3)?,
+                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    branch: row.get(5)?,
+                    tag: row.get(6)?,
+                    is_release: row.get::<_, i32>(7)? != 0,
+                    binary_path: binary_str.map(std::path::PathBuf::from),
+                    build_status: serde_json::from_str(&status_str).unwrap_or(BuildStatus::Pending),
+                })
+            })
+            .optional()?;
+
+        Ok(revision)
+    }
+
+    pub fn get_revision_by_hash_prefix(
+        &self,
+        engine_id: &str,
+        hash_prefix: &str,
+    ) -> Result<Option<EngineRevision>> {
+        let conn = self.conn.lock().unwrap();
+        let like = format!("{}%", hash_prefix);
+        let mut stmt = conn.prepare(
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+             FROM revisions
+             WHERE engine_id = ?1 AND commit_hash LIKE ?2
+             ORDER BY commit_date ASC
+             LIMIT 2",
+        )?;
+
+        let revisions = stmt
+            .query_map(params![engine_id, like], |row| {
+                let date_str: String = row.get(4)?;
+                let status_str: String = row.get(9)?;
+                let binary_str: Option<String> = row.get(8)?;
+                Ok(EngineRevision {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    commit_hash: row.get(2)?,
+                    commit_message: row.get(3)?,
+                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    branch: row.get(5)?,
+                    tag: row.get(6)?,
+                    is_release: row.get::<_, i32>(7)? != 0,
+                    binary_path: binary_str.map(std::path::PathBuf::from),
+                    build_status: serde_json::from_str(&status_str).unwrap_or(BuildStatus::Pending),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        match revisions.as_slice() {
+            [] => Ok(None),
+            [revision] => Ok(Some(revision.clone())),
+            _ => anyhow::bail!("Commit prefix '{}' is ambiguous", hash_prefix),
+        }
+    }
+
     pub fn update_build_status(
         &self,
         revision_id: &str,
@@ -256,6 +359,31 @@ impl Storage {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn has_test_job(
+        &self,
+        engine_id: &str,
+        dev_revision_id: &str,
+        base_revision_id: &str,
+        job_type: JobType,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM test_jobs
+             WHERE engine_id = ?1
+               AND dev_revision_id = ?2
+               AND base_revision_id = ?3
+               AND job_type = ?4",
+            params![
+                engine_id,
+                dev_revision_id,
+                base_revision_id,
+                serde_json::to_string(&job_type)?,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn get_next_job(&self) -> Result<Option<TestJob>> {
@@ -363,23 +491,183 @@ impl Storage {
         Ok(())
     }
 
+    pub fn list_recent_jobs(&self, limit: usize) -> Result<Vec<JobSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT
+                j.id,
+                j.engine_id,
+                e.name,
+                j.dev_revision_id,
+                dev.commit_hash,
+                j.base_revision_id,
+                base.commit_hash,
+                j.status,
+                j.priority,
+                j.job_type,
+                j.created_at,
+                j.started_at,
+                j.completed_at,
+                j.wins,
+                j.losses,
+                j.draws,
+                j.elo_diff,
+                j.elo_error,
+                j.los,
+                j.sprt_result
+             FROM test_jobs j
+             JOIN engines e ON e.id = j.engine_id
+             JOIN revisions dev ON dev.id = j.dev_revision_id
+             JOIN revisions base ON base.id = j.base_revision_id
+             ORDER BY j.created_at DESC
+             LIMIT ?1",
+        )?;
+
+        let jobs = stmt
+            .query_map(params![limit as i64], |row| {
+                let status_str: String = row.get(7)?;
+                let job_type_str: String = row.get(9)?;
+                let created_at: String = row.get(10)?;
+                let started_at: Option<String> = row.get(11)?;
+                let completed_at: Option<String> = row.get(12)?;
+                let sprt_result: Option<String> = row.get(19)?;
+                Ok(JobSummary {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    engine_name: row.get(2)?,
+                    dev_revision_id: row.get(3)?,
+                    dev_commit_hash: row.get(4)?,
+                    base_revision_id: row.get(5)?,
+                    base_commit_hash: row.get(6)?,
+                    status: serde_json::from_str(&status_str).unwrap_or(TestStatus::Queued),
+                    priority: row.get(8)?,
+                    job_type: serde_json::from_str(&job_type_str).unwrap_or(JobType::Sequential),
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    started_at: started_at.map(|ts| {
+                        chrono::DateTime::parse_from_rfc3339(&ts)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    completed_at: completed_at.map(|ts| {
+                        chrono::DateTime::parse_from_rfc3339(&ts)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    wins: row.get(13)?,
+                    losses: row.get(14)?,
+                    draws: row.get(15)?,
+                    elo_diff: row.get(16)?,
+                    elo_error: row.get(17)?,
+                    los: row.get(18)?,
+                    sprt_result: sprt_result.and_then(|s| serde_json::from_str(&s).ok()),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
+    // ── Bisect session CRUD ──────────────────────────────────────
+
+    pub fn insert_bisect_session(&self, session: &BisectSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO bisect_sessions
+             (id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, status, culprit_revision_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session.id,
+                session.engine_id,
+                session.good_revision_id,
+                session.bad_revision_id,
+                serde_json::to_string(&session.commit_range)?,
+                session.current_index.map(|i| i as i64),
+                serde_json::to_string(&session.status)?,
+                session.culprit_revision_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_bisect_session(&self, session: &BisectSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE bisect_sessions
+             SET good_revision_id = ?1,
+                 bad_revision_id = ?2,
+                 commit_range = ?3,
+                 current_index = ?4,
+                 status = ?5,
+                 culprit_revision_id = ?6
+             WHERE id = ?7",
+            params![
+                session.good_revision_id,
+                session.bad_revision_id,
+                serde_json::to_string(&session.commit_range)?,
+                session.current_index.map(|i| i as i64),
+                serde_json::to_string(&session.status)?,
+                session.culprit_revision_id,
+                session.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_running_bisect_sessions(&self) -> Result<Vec<BisectSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, status, culprit_revision_id
+             FROM bisect_sessions
+             WHERE status = ?1",
+        )?;
+
+        let sessions = stmt
+            .query_map(
+                params![serde_json::to_string(&BisectStatus::Running)?],
+                |row| {
+                    let commit_range: String = row.get(4)?;
+                    let status: String = row.get(6)?;
+                    let current_index: Option<i64> = row.get(5)?;
+                    Ok(BisectSession {
+                        id: row.get(0)?,
+                        engine_id: row.get(1)?,
+                        good_revision_id: row.get(2)?,
+                        bad_revision_id: row.get(3)?,
+                        commit_range: serde_json::from_str(&commit_range).unwrap_or_default(),
+                        current_index: current_index.map(|i| i as usize),
+                        status: serde_json::from_str(&status).unwrap_or(BisectStatus::Running),
+                        culprit_revision_id: row.get(7)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(sessions)
+    }
+
     // ── Elo timeline queries ─────────────────────────────────────
 
-    pub fn get_elo_timeline(&self, engine_id: &str, branch: Option<&str>) -> Result<Vec<EloDataPoint>> {
+    pub fn get_elo_timeline(
+        &self,
+        engine_id: &str,
+        branch: Option<&str>,
+    ) -> Result<Vec<EloDataPoint>> {
         let conn = self.conn.lock().unwrap();
         let query = if branch.is_some() {
             "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN test_jobs j ON j.dev_revision_id = r.id
-             WHERE r.engine_id = ?1 AND r.branch = ?2 AND j.status = '\"Completed\"'
+             WHERE r.engine_id = ?1 AND r.branch = ?2 AND j.status = '\"Completed\"' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         } else {
             "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN test_jobs j ON j.dev_revision_id = r.id
-             WHERE r.engine_id = ?1 AND j.status = '\"Completed\"'
+             WHERE r.engine_id = ?1 AND j.status = '\"Completed\"' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         };
 
@@ -419,22 +707,24 @@ impl Storage {
 
         let active: u32 = conn.query_row(
             "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Running\"'",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )?;
         let queued: u32 = conn.query_row(
             "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Queued\"'",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )?;
         let completed: u32 = conn.query_row(
             "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Completed\"'",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )?;
-        let engines: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM engines", [], |r| r.get(0),
-        )?;
+        let engines: u32 = conn.query_row("SELECT COUNT(*) FROM engines", [], |r| r.get(0))?;
         let total_games: u64 = conn.query_row(
             "SELECT COALESCE(SUM(wins + losses + draws), 0) FROM test_jobs",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )?;
 
         Ok(SystemStatus {

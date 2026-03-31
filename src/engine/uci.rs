@@ -7,15 +7,17 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// A running UCI engine process
 pub struct UciEngine {
     name: String,
     process: Child,
     stdin: std::process::ChildStdin,
-    reader: BufReader<std::process::ChildStdout>,
+    stdout_rx: Receiver<String>,
 }
 
 impl UciEngine {
@@ -30,13 +32,26 @@ impl UciEngine {
 
         let stdin = process.stdin.take().context("No stdin")?;
         let stdout = process.stdout.take().context("No stdout")?;
-        let reader = BufReader::new(stdout);
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        if stdout_tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
         let mut engine = Self {
             name: name.to_string(),
             process,
             stdin,
-            reader,
+            stdout_rx,
         };
 
         engine.send_cmd("uci")?;
@@ -53,23 +68,28 @@ impl UciEngine {
         Ok(())
     }
 
-    /// Read one line from the engine
-    pub fn read_line(&mut self) -> Result<String> {
-        let mut line = String::new();
-        self.reader.read_line(&mut line)?;
-        let line = line.trim_end().to_string();
-        debug!("[{}] << {}", self.name, line);
-        Ok(line)
-    }
-
     /// Wait until a line starting with the expected prefix appears
     pub fn wait_for(&mut self, prefix: &str, timeout: Duration) -> Result<String> {
         let start = Instant::now();
         loop {
-            if start.elapsed() > timeout {
+            if start.elapsed() >= timeout {
                 anyhow::bail!("Timeout waiting for '{}' from {}", prefix, self.name);
             }
-            let line = self.read_line()?;
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let line = match self.stdout_rx.recv_timeout(remaining) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => {
+                    anyhow::bail!("Timeout waiting for '{}' from {}", prefix, self.name);
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!(
+                        "Engine '{}' exited while waiting for '{}'",
+                        self.name,
+                        prefix
+                    );
+                }
+            };
+            debug!("[{}] << {}", self.name, line);
             if line.starts_with(prefix) {
                 return Ok(line);
             }

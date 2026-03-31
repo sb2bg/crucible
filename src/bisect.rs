@@ -4,22 +4,22 @@
 //! test the midpoint, determine if it's good or bad, and narrow the range
 //! until the guilty commit is found.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
-use uuid::Uuid;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::scheduler::priority;
 use crate::storage::Storage;
 use crate::types::*;
 
 pub struct BisectRunner {
-    storage: Storage,
+    _storage: Storage,
 }
 
 impl BisectRunner {
     pub fn new(storage: Storage) -> Self {
-        Self { storage }
+        Self { _storage: storage }
     }
 
     /// Start a new bisect session
@@ -82,12 +82,14 @@ impl BisectRunner {
         &self,
         session: &mut BisectSession,
         tested_index: usize,
+        tested_revision_id: &str,
         is_good: bool,
     ) -> BisectAction {
         if is_good {
             // The tested commit is good, so the regression is after it
             // New range: [tested_index..end]
             session.commit_range = session.commit_range[tested_index..].to_vec();
+            session.good_revision_id = tested_revision_id.to_string();
             info!(
                 "Bisect: commit is GOOD, narrowing to {} commits",
                 session.commit_range.len()
@@ -96,6 +98,7 @@ impl BisectRunner {
             // The tested commit is bad, so the regression is before it
             // New range: [start..=tested_index]
             session.commit_range = session.commit_range[..=tested_index].to_vec();
+            session.bad_revision_id = tested_revision_id.to_string();
             info!(
                 "Bisect: commit is BAD, narrowing to {} commits",
                 session.commit_range.len()
@@ -107,7 +110,10 @@ impl BisectRunner {
             let culprit = session.commit_range.last().unwrap().clone();
             session.status = BisectStatus::Found;
             session.culprit_revision_id = Some(culprit.clone());
-            info!("Bisect complete! Culprit: {}", &culprit[..8.min(culprit.len())]);
+            info!(
+                "Bisect complete! Culprit: {}",
+                &culprit[..8.min(culprit.len())]
+            );
             BisectAction::Found { culprit }
         } else {
             let mid = session.commit_range.len() / 2;
@@ -167,4 +173,53 @@ pub enum BisectAction {
     },
     /// Bisect is complete
     Found { culprit: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updates_good_boundary_when_midpoint_is_good() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let runner = BisectRunner::new(storage);
+        let mut session = runner.start_bisect(
+            "engine",
+            "good-rev",
+            "bad-rev",
+            vec!["good".into(), "mid".into(), "bad".into()],
+        )?;
+
+        let action = runner.process_result(&mut session, 1, "mid-rev", true);
+
+        assert!(matches!(
+            action,
+            BisectAction::Found { ref culprit } if culprit == "bad"
+        ));
+        assert_eq!(session.good_revision_id, "mid-rev");
+        Ok(())
+    }
+
+    #[test]
+    fn updates_bad_boundary_when_midpoint_is_bad() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let runner = BisectRunner::new(storage);
+        let mut session = runner.start_bisect(
+            "engine",
+            "good-rev",
+            "bad-rev",
+            vec!["good".into(), "mid".into(), "bad".into(), "worse".into()],
+        )?;
+
+        let action = runner.process_result(&mut session, 2, "bad-mid-rev", false);
+
+        assert!(matches!(
+            action,
+            BisectAction::TestNext {
+                ref commit_hash, ..
+            } if commit_hash == "mid"
+        ));
+        assert_eq!(session.bad_revision_id, "bad-mid-rev");
+        Ok(())
+    }
 }

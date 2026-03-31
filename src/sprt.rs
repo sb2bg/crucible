@@ -150,8 +150,6 @@ fn log_likelihood_ratio(wins: u32, draws: u32, losses: u32, elo0: f64, elo1: f64
 
     let w = wins as f64 / total;
     let d = draws as f64 / total;
-    let l = losses as f64 / total;
-
     let s0 = elo_to_score(elo0);
     let s1 = elo_to_score(elo1);
     let s = w + d * 0.5;

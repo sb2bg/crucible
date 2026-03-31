@@ -1,11 +1,20 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
 use crucible::config::Config;
+use crucible::engine::match_runner::{run_match, MatchConfig};
+use crucible::git::GitManager;
+use crucible::scheduler::Scheduler;
+use crucible::sprt::SprtBounds;
 use crucible::storage::Storage;
+use crucible::types::{
+    BisectStatus, BuildStatus, Engine, JobType, TestJob, TestResult, TestStatus, TimeControl,
+};
 
 #[derive(Parser)]
 #[command(
@@ -128,7 +137,7 @@ async fn main() -> Result<()> {
             let web_host = config.server.web_host.clone();
             let web_port = config.server.web_port;
 
-            let web_handle = tokio::spawn(async move {
+            let _web_handle = tokio::spawn(async move {
                 let router = crucible::web::create_router(web_storage);
                 let addr = format!("{}:{}", web_host, web_port);
                 info!("Web dashboard: http://{}", addr);
@@ -226,30 +235,117 @@ async fn main() -> Result<()> {
         Commands::Bisect { engine, good, bad } => {
             let db_path = config.data_dir.join("crucible.db");
             let storage = Storage::open(&db_path)?;
-
-            println!(
-                "Starting bisect for '{}': good={}, bad={}",
-                engine, good, bad
+            let engine = storage
+                .get_engine_by_name(&engine)?
+                .with_context(|| format!("Engine '{}' is not tracked", engine))?;
+            let git_mgr = GitManager::new(
+                &engine.repo_url,
+                &engine.local_path,
+                &engine.build_cmd,
+                &engine.binary_path,
             );
-            println!("This will binary-search for the commit that caused the regression.");
-            println!("Jobs will be queued with highest priority.");
-            // TODO: Wire up bisect runner
+            let repo = git_mgr.ensure_repo()?;
+            sync_engine_revisions(&storage, &engine, &git_mgr, &repo)?;
+
+            let good_revision = storage
+                .get_revision_by_hash_prefix(&engine.id, &good)?
+                .with_context(|| format!("Could not resolve good commit '{}'", good))?;
+            let bad_revision = storage
+                .get_revision_by_hash_prefix(&engine.id, &bad)?
+                .with_context(|| format!("Could not resolve bad commit '{}'", bad))?;
+
+            let bisect_runner = BisectRunner::new(storage.clone());
+            let mut session = bisect_runner.start_bisect(
+                &engine.id,
+                &good_revision.id,
+                &bad_revision.id,
+                git_mgr.commits_between(
+                    &repo,
+                    &good_revision.commit_hash,
+                    &bad_revision.commit_hash,
+                    &engine.id,
+                )?,
+            )?;
+
+            match bisect_runner
+                .next_commit_to_test(&session)
+                .context("Bisect range did not produce a midpoint")?
+            {
+                BisectStep::Test {
+                    commit_hash,
+                    index,
+                    remaining_range,
+                } => {
+                    let test_revision = storage
+                        .get_revision_by_hash_prefix(&engine.id, &commit_hash)?
+                        .with_context(|| {
+                            format!("Could not resolve bisect midpoint '{}'", commit_hash)
+                        })?;
+                    session.current_index = Some(index);
+                    storage.insert_bisect_session(&session)?;
+
+                    let job = bisect_runner.create_bisect_job(
+                        &engine.id,
+                        &test_revision.id,
+                        &good_revision.id,
+                        configured_time_control(&config),
+                    );
+                    storage.insert_test_job(&job)?;
+
+                    println!(
+                        "Queued bisect for '{}' over {} commits.",
+                        engine.name, remaining_range
+                    );
+                    println!(
+                        "First midpoint: {}",
+                        &test_revision.commit_hash[..8.min(test_revision.commit_hash.len())]
+                    );
+                }
+                BisectStep::Found { culprit } => {
+                    println!(
+                        "Bisect range is already minimal. Suspected culprit: {}",
+                        culprit
+                    );
+                }
+            }
         }
 
         Commands::Test { engine, dev, base } => {
             let db_path = config.data_dir.join("crucible.db");
             let storage = Storage::open(&db_path)?;
+            let engine = storage
+                .get_engine_by_name(&engine)?
+                .with_context(|| format!("Engine '{}' is not tracked", engine))?;
+            let git_mgr = GitManager::new(
+                &engine.repo_url,
+                &engine.local_path,
+                &engine.build_cmd,
+                &engine.binary_path,
+            );
+            let repo = git_mgr.ensure_repo()?;
+            sync_engine_revisions(&storage, &engine, &git_mgr, &repo)?;
+
+            let dev_revision = storage
+                .get_revision_by_hash_prefix(&engine.id, &dev)?
+                .with_context(|| format!("Could not resolve dev commit '{}'", dev))?;
+            let base_revision = storage
+                .get_revision_by_hash_prefix(&engine.id, &base)?
+                .with_context(|| format!("Could not resolve base commit '{}'", base))?;
+
+            let scheduler = Scheduler::new(storage.clone(), config.clone());
+            let job =
+                scheduler.schedule_manual_test(&engine.id, &dev_revision.id, &base_revision.id)?;
 
             println!(
-                "Queuing manual test: {} vs {} for '{}'",
-                &dev[..8.min(dev.len())],
-                &base[..8.min(base.len())],
-                engine
+                "Queued manual test: {} vs {} for '{}'",
+                &dev_revision.commit_hash[..8.min(dev_revision.commit_hash.len())],
+                &base_revision.commit_hash[..8.min(base_revision.commit_hash.len())],
+                engine.name
             );
-            // TODO: Wire up manual test scheduling
+            println!("Job id: {}", job.id);
         }
 
-        Commands::Status { engine } => {
+        Commands::Status { engine: _ } => {
             let db_path = config.data_dir.join("crucible.db");
             if !db_path.exists() {
                 println!("No data yet. Run `crucible run` first.");
@@ -288,7 +384,7 @@ async fn run_test_loop(storage: Storage, config: Config) {
 
         for engine in &engines {
             // Clone/fetch repo, enumerate commits, build, schedule tests
-            let git_mgr = crucible::git::GitManager::new(
+            let git_mgr = GitManager::new(
                 &engine.repo_url,
                 &engine.local_path,
                 &engine.build_cmd,
@@ -297,63 +393,8 @@ async fn run_test_loop(storage: Storage, config: Config) {
 
             match git_mgr.ensure_repo() {
                 Ok(repo) => {
-                    for branch in &engine.branches {
-                        match git_mgr.list_commits(
-                            &repo,
-                            branch,
-                            &engine.id,
-                            engine.start_from.as_deref(),
-                        ) {
-                            Ok(revisions) => {
-                                info!(
-                                    "Engine '{}' branch '{}': {} commits",
-                                    engine.name,
-                                    branch,
-                                    revisions.len()
-                                );
-                                for rev in &revisions {
-                                    let _ = storage.insert_revision(rev);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to list commits for {}/{}: {}",
-                                    engine.name,
-                                    branch,
-                                    e
-                                );
-                            }
-                        }
-                    }
-
-                    // Build pending revisions
-                    if let Ok(revisions) = storage.get_revisions_for_engine(&engine.id) {
-                        for rev in revisions
-                            .iter()
-                            .filter(|r| r.build_status == crucible::types::BuildStatus::Pending)
-                        {
-                            match git_mgr.build_revision(&repo, &rev.commit_hash) {
-                                Ok(binary) => {
-                                    let _ = storage.update_build_status(
-                                        &rev.id,
-                                        crucible::types::BuildStatus::Success,
-                                        Some(&binary),
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Build failed for {}: {}",
-                                        &rev.commit_hash[..8],
-                                        e
-                                    );
-                                    let _ = storage.update_build_status(
-                                        &rev.id,
-                                        crucible::types::BuildStatus::Failed,
-                                        None,
-                                    );
-                                }
-                            }
-                        }
+                    if let Err(e) = sync_engine_revisions(&storage, engine, &git_mgr, &repo) {
+                        tracing::error!("Failed to sync revisions for '{}': {}", engine.name, e);
                     }
                 }
                 Err(e) => {
@@ -362,7 +403,7 @@ async fn run_test_loop(storage: Storage, config: Config) {
             }
 
             // Schedule and run test jobs
-            let scheduler = crucible::scheduler::Scheduler::new(storage.clone(), config.clone());
+            let scheduler = Scheduler::new(storage.clone(), config.clone());
             match scheduler.schedule_engine(&engine.id) {
                 Ok(jobs) => {
                     for job in &jobs {
@@ -390,13 +431,272 @@ async fn run_test_loop(storage: Storage, config: Config) {
             );
             let _ = storage.set_job_status(&job.id, crucible::types::TestStatus::Running);
 
-            // Get binary paths from revisions
-            // TODO: Actually run the match here using engine::match_runner
-            // For now, mark as completed to prevent infinite loop
-            let _ = storage.set_job_status(&job.id, crucible::types::TestStatus::Completed);
+            match execute_job(&storage, &config, &job).await {
+                Ok(result) => {
+                    if let Err(err) = persist_job_result(&storage, &job, &result) {
+                        tracing::error!("Failed to persist job {}: {}", job.id, err);
+                        let _ = storage.set_job_status(&job.id, TestStatus::Failed);
+                        let _ = mark_bisect_session_failed(&storage, &job);
+                        continue;
+                    }
+
+                    if let Err(err) = advance_bisect_after_job(&storage, &config, &job, &result) {
+                        tracing::error!("Failed to advance bisect for job {}: {}", job.id, err);
+                        let _ = mark_bisect_session_failed(&storage, &job);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("Job {} failed: {}", job.id, err);
+                    let _ = storage.set_job_status(&job.id, TestStatus::Failed);
+                    let _ = mark_bisect_session_failed(&storage, &job);
+                }
+            }
         }
 
         // Sleep before next polling cycle
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
+}
+
+fn configured_time_control(config: &Config) -> TimeControl {
+    TimeControl {
+        base_time_ms: config.testing.time_control.base_ms,
+        increment_ms: config.testing.time_control.increment_ms,
+        nodes: config.testing.time_control.nodes,
+    }
+}
+
+fn configured_sprt_bounds(config: &Config, job_type: JobType) -> SprtBounds {
+    match job_type {
+        JobType::Bisect => SprtBounds::regression(),
+        _ => SprtBounds {
+            elo0: config.testing.sprt.elo0,
+            elo1: config.testing.sprt.elo1,
+            alpha: config.testing.sprt.alpha,
+            beta: config.testing.sprt.beta,
+        },
+    }
+}
+
+fn sync_engine_revisions(
+    storage: &Storage,
+    engine: &Engine,
+    git_mgr: &GitManager,
+    repo: &git2::Repository,
+) -> Result<()> {
+    for branch in &engine.branches {
+        let revisions =
+            git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;
+        info!(
+            "Engine '{}' branch '{}': {} commits",
+            engine.name,
+            branch,
+            revisions.len()
+        );
+        for revision in &revisions {
+            storage.insert_revision(revision)?;
+        }
+    }
+
+    let revisions = storage.get_revisions_for_engine(&engine.id)?;
+    for revision in revisions
+        .iter()
+        .filter(|r| r.build_status == BuildStatus::Pending)
+    {
+        match git_mgr.build_revision(repo, &revision.commit_hash) {
+            Ok(binary) => {
+                storage.update_build_status(&revision.id, BuildStatus::Success, Some(&binary))?;
+            }
+            Err(err) => {
+                warn!("Build failed for {}: {}", &revision.commit_hash[..8], err);
+                storage.update_build_status(&revision.id, BuildStatus::Failed, None)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Result<TestResult> {
+    let dev_revision = storage
+        .get_revision_by_id(&job.dev_revision_id)?
+        .with_context(|| format!("Missing dev revision '{}'", job.dev_revision_id))?;
+    let base_revision = storage
+        .get_revision_by_id(&job.base_revision_id)?
+        .with_context(|| format!("Missing base revision '{}'", job.base_revision_id))?;
+
+    let dev_binary = dev_revision
+        .binary_path
+        .clone()
+        .with_context(|| format!("Revision '{}' is missing a built binary", dev_revision.id))?;
+    let base_binary = base_revision
+        .binary_path
+        .clone()
+        .with_context(|| format!("Revision '{}' is missing a built binary", base_revision.id))?;
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    run_match(
+        MatchConfig {
+            dev_binary,
+            base_binary,
+            time_control: job.time_control.clone(),
+            opening_book: load_opening_book(
+                job.opening_book
+                    .as_deref()
+                    .or(config.testing.opening_book.as_deref()),
+            )?,
+            sprt_bounds: configured_sprt_bounds(config, job.job_type),
+            max_games: config.testing.max_games,
+            hash_mb: config.testing.hash_mb,
+            threads: config.testing.engine_threads,
+        },
+        event_tx,
+    )
+    .await
+}
+
+fn load_opening_book(path: Option<&str>) -> Result<Option<Vec<String>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read opening book '{}'", path))?;
+    let openings = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if openings.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(openings))
+    }
+}
+
+fn persist_job_result(storage: &Storage, job: &TestJob, result: &TestResult) -> Result<()> {
+    storage.update_job_result(
+        &job.id,
+        result.wins,
+        result.losses,
+        result.draws,
+        result.elo_diff,
+        result.elo_error,
+        result.los,
+        result.sprt_result,
+    )?;
+
+    for game in &result.games {
+        storage.insert_game(&job.id, game)?;
+    }
+
+    storage.set_job_status(&job.id, TestStatus::Completed)?;
+    Ok(())
+}
+
+fn advance_bisect_after_job(
+    storage: &Storage,
+    config: &Config,
+    job: &TestJob,
+    result: &TestResult,
+) -> Result<()> {
+    if job.job_type != JobType::Bisect {
+        return Ok(());
+    }
+
+    let sessions = storage.get_running_bisect_sessions()?;
+    let Some(mut session) = sessions.into_iter().find(|session| {
+        session.engine_id == job.engine_id
+            && session.current_index.is_some()
+            && session.good_revision_id == job.base_revision_id
+    }) else {
+        return Ok(());
+    };
+
+    let tested_index = session
+        .current_index
+        .context("Bisect session lost its midpoint index")?;
+    let bisect_runner = BisectRunner::new(storage.clone());
+
+    let action = match result.sprt_result {
+        crucible::types::SprtResult::H1Accepted => {
+            bisect_runner.process_result(&mut session, tested_index, &job.dev_revision_id, true)
+        }
+        crucible::types::SprtResult::H0Accepted => {
+            bisect_runner.process_result(&mut session, tested_index, &job.dev_revision_id, false)
+        }
+        crucible::types::SprtResult::Inconclusive => {
+            session.status = BisectStatus::Failed;
+            session.current_index = None;
+            storage.update_bisect_session(&session)?;
+            return Ok(());
+        }
+    };
+
+    match action {
+        BisectAction::Found { culprit } => {
+            let culprit_revision = storage
+                .get_revision_by_hash_prefix(&session.engine_id, &culprit)?
+                .with_context(|| format!("Could not resolve culprit '{}'", culprit))?;
+            session.status = BisectStatus::Found;
+            session.current_index = None;
+            session.culprit_revision_id = Some(culprit_revision.id);
+            storage.update_bisect_session(&session)?;
+        }
+        BisectAction::TestNext {
+            commit_hash,
+            index,
+            remaining,
+        } => {
+            let next_revision = storage
+                .get_revision_by_hash_prefix(&session.engine_id, &commit_hash)?
+                .with_context(|| {
+                    format!("Could not resolve next bisect commit '{}'", commit_hash)
+                })?;
+            session.current_index = Some(index);
+            storage.update_bisect_session(&session)?;
+
+            if !storage.has_test_job(
+                &session.engine_id,
+                &next_revision.id,
+                &session.good_revision_id,
+                JobType::Bisect,
+            )? {
+                let next_job = bisect_runner.create_bisect_job(
+                    &session.engine_id,
+                    &next_revision.id,
+                    &session.good_revision_id,
+                    configured_time_control(config),
+                );
+                storage.insert_test_job(&next_job)?;
+                info!(
+                    "Queued next bisect job for engine {} ({} commits remaining)",
+                    session.engine_id, remaining
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn mark_bisect_session_failed(storage: &Storage, job: &TestJob) -> Result<()> {
+    if job.job_type != JobType::Bisect {
+        return Ok(());
+    }
+
+    let sessions = storage.get_running_bisect_sessions()?;
+    if let Some(mut session) = sessions.into_iter().find(|session| {
+        session.engine_id == job.engine_id
+            && session.current_index.is_some()
+            && session.good_revision_id == job.base_revision_id
+    }) {
+        session.status = BisectStatus::Failed;
+        session.current_index = None;
+        storage.update_bisect_session(&session)?;
+    }
+
+    Ok(())
 }

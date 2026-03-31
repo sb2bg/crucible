@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use git2::{BranchType, Repository, Sort};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::types::*;
 
@@ -20,12 +20,7 @@ pub struct GitManager {
 }
 
 impl GitManager {
-    pub fn new(
-        repo_url: &str,
-        local_path: &Path,
-        build_cmd: &str,
-        binary_path: &str,
-    ) -> Self {
+    pub fn new(repo_url: &str, local_path: &Path, build_cmd: &str, binary_path: &str) -> Self {
         Self {
             repo_url: repo_url.to_string(),
             local_path: local_path.to_path_buf(),
@@ -38,8 +33,8 @@ impl GitManager {
     pub fn ensure_repo(&self) -> Result<Repository> {
         if self.local_path.exists() {
             info!("Opening existing repo at {:?}", self.local_path);
-            let repo = Repository::open(&self.local_path)
-                .context("Failed to open existing repository")?;
+            let repo =
+                Repository::open(&self.local_path).context("Failed to open existing repository")?;
             // Fetch latest changes
             self.fetch(&repo)?;
             Ok(repo)
@@ -160,7 +155,10 @@ impl GitManager {
         let commit = repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
-        repo.checkout_tree(tree.as_object(), Some(git2::build::CheckoutBuilder::new().force()))?;
+        repo.checkout_tree(
+            tree.as_object(),
+            Some(git2::build::CheckoutBuilder::new().force()),
+        )?;
         repo.set_head_detached(oid)?;
 
         info!("Building commit {}...", &commit_hash[..8]);
@@ -183,10 +181,7 @@ impl GitManager {
         // Copy the built binary to a versioned location
         let src_binary = self.local_path.join(&self.binary_path);
         if !src_binary.exists() {
-            anyhow::bail!(
-                "Binary not found at {:?} after build",
-                src_binary
-            );
+            anyhow::bail!("Binary not found at {:?} after build", src_binary);
         }
 
         let dest_dir = self.local_path.join(".crucible-builds");
@@ -213,7 +208,7 @@ impl GitManager {
         repo: &Repository,
         old_hash: &str,
         new_hash: &str,
-        engine_id: &str,
+        _engine_id: &str,
     ) -> Result<Vec<String>> {
         let old_oid = git2::Oid::from_str(old_hash)?;
         let new_oid = git2::Oid::from_str(new_hash)?;
@@ -223,9 +218,12 @@ impl GitManager {
         revwalk.hide(old_oid)?;
         revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
 
-        let hashes: Vec<String> = revwalk
-            .filter_map(|oid| oid.ok().map(|o| o.to_string()))
-            .collect();
+        let mut hashes = vec![old_oid.to_string()];
+        hashes.extend(
+            revwalk
+                .filter_map(|oid| oid.ok().map(|o| o.to_string()))
+                .collect::<Vec<_>>(),
+        );
 
         Ok(hashes)
     }

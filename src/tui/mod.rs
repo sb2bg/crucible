@@ -9,10 +9,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use ratatui::{
-    prelude::*,
-    widgets::*,
-};
+use ratatui::{prelude::*, widgets::*};
 use std::io::stdout;
 use std::time::Duration;
 
@@ -81,8 +78,8 @@ impl Tui {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Title bar
-                Constraint::Length(3),  // Tab bar
+                Constraint::Length(3), // Title bar
+                Constraint::Length(3), // Tab bar
                 Constraint::Min(0),    // Content
                 Constraint::Length(1), // Status bar
             ])
@@ -96,15 +93,20 @@ impl Tui {
         frame.render_widget(title, chunks[0]);
 
         // Tab bar
-        let tabs = Tabs::new(vec!["[1] Dashboard", "[2] Jobs", "[3] Timeline", "[4] Bisect"])
-            .select(match self.current_tab {
-                Tab::Dashboard => 0,
-                Tab::Jobs => 1,
-                Tab::Timeline => 2,
-                Tab::Bisect => 3,
-            })
-            .style(Style::default().fg(Color::DarkGray))
-            .highlight_style(Style::default().fg(Color::Yellow).bold());
+        let tabs = Tabs::new(vec![
+            "[1] Dashboard",
+            "[2] Jobs",
+            "[3] Timeline",
+            "[4] Bisect",
+        ])
+        .select(match self.current_tab {
+            Tab::Dashboard => 0,
+            Tab::Jobs => 1,
+            Tab::Timeline => 2,
+            Tab::Bisect => 3,
+        })
+        .style(Style::default().fg(Color::DarkGray))
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
         frame.render_widget(tabs, chunks[1]);
 
         // Content
@@ -141,29 +143,47 @@ impl Tui {
         let stats_text = vec![
             Line::from(vec![
                 Span::raw("  Engines tracked:  "),
-                Span::styled(status.engines_tracked.to_string(), Style::default().fg(Color::Green).bold()),
+                Span::styled(
+                    status.engines_tracked.to_string(),
+                    Style::default().fg(Color::Green).bold(),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  Active jobs:      "),
-                Span::styled(status.active_jobs.to_string(), Style::default().fg(Color::Yellow).bold()),
+                Span::styled(
+                    status.active_jobs.to_string(),
+                    Style::default().fg(Color::Yellow).bold(),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("  Queued jobs:      "),
-                Span::styled(status.queued_jobs.to_string(), Style::default().fg(Color::Blue)),
+                Span::styled(
+                    status.queued_jobs.to_string(),
+                    Style::default().fg(Color::Blue),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("  Completed jobs:   "),
-                Span::styled(status.completed_jobs.to_string(), Style::default().fg(Color::Green)),
+                Span::styled(
+                    status.completed_jobs.to_string(),
+                    Style::default().fg(Color::Green),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  Total games:      "),
-                Span::styled(status.total_games_played.to_string(), Style::default().fg(Color::Cyan).bold()),
+                Span::styled(
+                    status.total_games_played.to_string(),
+                    Style::default().fg(Color::Cyan).bold(),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("  Games/min:        "),
-                Span::styled(format!("{:.1}", status.games_per_minute), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("{:.1}", status.games_per_minute),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
 
@@ -179,11 +199,34 @@ impl Tui {
     }
 
     fn draw_jobs(&self, frame: &mut Frame, area: Rect) {
-        let header = Row::new(vec!["Status", "Engine", "Dev", "Base", "W/D/L", "Elo", "SPRT"])
-            .style(Style::default().fg(Color::Yellow).bold());
+        let jobs = self.storage.list_recent_jobs(12).unwrap_or_default();
+        let header = Row::new(vec![
+            "Status", "Engine", "Dev", "Base", "W/D/L", "Elo", "SPRT",
+        ])
+        .style(Style::default().fg(Color::Yellow).bold());
+
+        let rows = jobs.into_iter().map(|job| {
+            let elo = job
+                .elo_diff
+                .map(|elo| format!("{:+.1}", elo))
+                .unwrap_or_else(|| "-".into());
+            let sprt = job
+                .sprt_result
+                .map(|result| format!("{:?}", result))
+                .unwrap_or_else(|| "-".into());
+            Row::new(vec![
+                format!("{:?}", job.status),
+                job.engine_name,
+                job.dev_commit_hash[..8.min(job.dev_commit_hash.len())].to_string(),
+                job.base_commit_hash[..8.min(job.base_commit_hash.len())].to_string(),
+                format!("{}/{}/{}", job.wins, job.draws, job.losses),
+                elo,
+                sprt,
+            ])
+        });
 
         let table = Table::new(
-            Vec::<Row>::new(), // Populated from storage in real implementation
+            rows,
             [
                 Constraint::Length(10),
                 Constraint::Length(15),
@@ -191,7 +234,7 @@ impl Tui {
                 Constraint::Length(10),
                 Constraint::Length(15),
                 Constraint::Length(12),
-                Constraint::Length(14),
+                Constraint::Length(18),
             ],
         )
         .header(header)
@@ -201,28 +244,92 @@ impl Tui {
     }
 
     fn draw_timeline(&self, frame: &mut Frame, area: Rect) {
-        // ASCII Elo chart
-        let chart_block = Block::default().title(" Elo Timeline ").borders(Borders::ALL);
-        let inner = chart_block.inner(area);
-        frame.render_widget(chart_block, area);
+        let lines = self
+            .storage
+            .get_engines()
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|engine| {
+                let timeline = self
+                    .storage
+                    .get_elo_timeline(&engine.id, None)
+                    .unwrap_or_default();
+                let mut lines = vec![Line::from(Span::styled(
+                    format!("  {}:", engine.name),
+                    Style::default().fg(Color::Yellow).bold(),
+                ))];
+                if timeline.is_empty() {
+                    lines.push(Line::from("    No completed Elo data yet."));
+                } else {
+                    for point in timeline.into_iter().rev().take(6).rev() {
+                        lines.push(Line::from(format!(
+                            "    {}  {:+.1} +/- {:.1}  {} games",
+                            &point.commit_hash[..8.min(point.commit_hash.len())],
+                            point.elo,
+                            point.elo_error,
+                            point.games_played
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines
+            })
+            .collect::<Vec<_>>();
 
-        // Placeholder - in real implementation, draw sparkline/chart from Elo data points
-        let placeholder = Paragraph::new("  Elo timeline chart will render here\n  (commits along X axis, Elo on Y axis)")
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(placeholder, inner);
+        let content = if lines.is_empty() {
+            vec![Line::from("  No engines tracked yet.")]
+        } else {
+            lines
+        };
+
+        let paragraph = Paragraph::new(content)
+            .block(
+                Block::default()
+                    .title(" Elo Timeline ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
     }
 
     fn draw_bisect(&self, frame: &mut Frame, area: Rect) {
-        let bisect_info = Paragraph::new(vec![
-            Line::from("  No active bisect sessions."),
-            Line::from(""),
-            Line::from("  Start a bisect with:"),
-            Line::from(Span::styled(
-                "    crucible bisect --engine <name> --good <commit> --bad <commit>",
-                Style::default().fg(Color::Green),
-            )),
-        ])
-        .block(Block::default().title(" Bisect ").borders(Borders::ALL));
+        let sessions = self
+            .storage
+            .get_running_bisect_sessions()
+            .unwrap_or_default();
+        let lines = if sessions.is_empty() {
+            vec![
+                Line::from("  No active bisect sessions."),
+                Line::from(""),
+                Line::from("  Start a bisect with:"),
+                Line::from(Span::styled(
+                    "    crucible bisect --engine <name> --good <commit> --bad <commit>",
+                    Style::default().fg(Color::Green),
+                )),
+            ]
+        } else {
+            let mut lines = Vec::new();
+            for session in sessions {
+                lines.push(Line::from(format!(
+                    "  Engine {}: {} commits remaining",
+                    session.engine_id,
+                    session.commit_range.len()
+                )));
+                if let Some(index) = session.current_index {
+                    if let Some(commit) = session.commit_range.get(index) {
+                        lines.push(Line::from(format!(
+                            "    Testing midpoint {}",
+                            &commit[..8.min(commit.len())]
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+            }
+            lines
+        };
+
+        let bisect_info =
+            Paragraph::new(lines).block(Block::default().title(" Bisect ").borders(Borders::ALL));
         frame.render_widget(bisect_info, area);
     }
 }

@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn, error};
+use std::time::Instant;
+use tokio::sync::mpsc;
+use tracing::{error, info};
 
 use crate::engine::uci::UciEngine;
 use crate::sprt::{self, SprtBounds};
@@ -16,11 +16,25 @@ use crate::types::*;
 /// Event emitted during a match for live updates
 #[derive(Debug, Clone)]
 pub enum MatchEvent {
-    GameStarted { game_number: u32 },
-    GameCompleted { game_number: u32, result: GameResult },
-    SprtUpdate { wins: u32, draws: u32, losses: u32, llr_status: SprtResult },
-    MatchCompleted { result: TestResult },
-    Error { message: String },
+    GameStarted {
+        game_number: u32,
+    },
+    GameCompleted {
+        game_number: u32,
+        result: GameResult,
+    },
+    SprtUpdate {
+        wins: u32,
+        draws: u32,
+        losses: u32,
+        llr_status: SprtResult,
+    },
+    MatchCompleted {
+        result: TestResult,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Configuration for a match between two engine versions
@@ -45,9 +59,9 @@ pub async fn run_match(
     let mut losses: u32 = 0;
     let mut games: Vec<GameRecord> = Vec::new();
 
-    let openings = config.opening_book.unwrap_or_else(|| {
-        vec!["startpos".to_string()]
-    });
+    let openings = config
+        .opening_book
+        .unwrap_or_else(|| vec!["startpos".to_string()]);
 
     let mut game_number: u32 = 0;
 
@@ -228,19 +242,31 @@ fn play_game_blocking(
         }
 
         let is_white_turn = move_count % 2 == 0;
-        let current = if is_white_turn { &mut white } else { &mut black };
+        let current = if is_white_turn {
+            &mut white
+        } else {
+            &mut black
+        };
 
         let bestmove_line = if let Some(nodes) = tc.nodes {
             current.go_nodes(&position, &moves, nodes)?
         } else {
-            current.go_position(
+            let turn_start = Instant::now();
+            let bestmove_line = current.go_position(
                 &position,
                 &moves,
                 wtime,
                 btime,
                 tc.increment_ms,
                 tc.increment_ms,
-            )?
+            )?;
+            let elapsed_ms = turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            if is_white_turn {
+                wtime = wtime.saturating_sub(elapsed_ms);
+            } else {
+                btime = btime.saturating_sub(elapsed_ms);
+            }
+            bestmove_line
         };
 
         let bestmove = UciEngine::parse_bestmove(&bestmove_line);
@@ -258,11 +284,13 @@ fn play_game_blocking(
                 moves.push(mv);
                 move_count += 1;
 
-                // Add increment
-                if is_white_turn {
-                    wtime += tc.increment_ms;
-                } else {
-                    btime += tc.increment_ms;
+                // Apply increment after a completed move.
+                if tc.nodes.is_none() {
+                    if is_white_turn {
+                        wtime += tc.increment_ms;
+                    } else {
+                        btime += tc.increment_ms;
+                    }
                 }
             }
             _ => {

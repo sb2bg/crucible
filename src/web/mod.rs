@@ -13,12 +13,10 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse, Json},
-    routing::{get, post},
+    routing::get,
     Router,
 };
-use serde::Deserialize;
 use std::sync::Arc;
-use tracing::info;
 
 use crate::storage::Storage;
 
@@ -67,8 +65,10 @@ async fn timeline_handler(
 }
 
 async fn jobs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    // Return recent jobs
-    Json(serde_json::json!({"jobs": []}))
+    match state.storage.list_recent_jobs(50) {
+        Ok(jobs) => Json(serde_json::json!({ "jobs": jobs })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// The entire dashboard as a single embedded HTML page.

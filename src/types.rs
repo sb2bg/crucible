@@ -132,6 +132,31 @@ pub struct TestResult {
     pub games: Vec<GameRecord>,
 }
 
+/// Flattened test job data for status surfaces
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub id: String,
+    pub engine_id: String,
+    pub engine_name: String,
+    pub dev_revision_id: String,
+    pub dev_commit_hash: String,
+    pub base_revision_id: String,
+    pub base_commit_hash: String,
+    pub status: TestStatus,
+    pub priority: i32,
+    pub job_type: JobType,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+    pub elo_diff: Option<f64>,
+    pub elo_error: Option<f64>,
+    pub los: Option<f64>,
+    pub sprt_result: Option<SprtResult>,
+}
+
 impl TestResult {
     pub fn total_games(&self) -> u32 {
         self.wins + self.losses + self.draws

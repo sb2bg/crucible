@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     ports:
       - "8877:8877"
-    command: ["run", "--config", "/work/crucible.toml"]
+    command: ["--config", "/work/crucible.toml", "run"]
     volumes:
       - ./crucible.toml:/work/crucible.toml:ro
       - crucible-data:/work/.crucible

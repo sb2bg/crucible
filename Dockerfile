@@ -35,4 +35,4 @@ USER crucible
 EXPOSE 8877
 
 ENTRYPOINT ["crucible"]
-CMD ["run", "--config", "/work/crucible.toml"]
+CMD ["--config", "/work/crucible.toml", "run"]

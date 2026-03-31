@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crucible — Chess Engine CI</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface-hover: #1c2129;
+    --border: #30363d; --border-focus: #58a6ff;
+    --text: #e6edf3; --text-dim: #8b949e; --text-faint: #484f58;
+    --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Header ──────────────────────────────────────────────── */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header h1 { font-size: 16px; color: var(--accent); letter-spacing: -0.5px; }
+  .header h1 span { color: var(--text-dim); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .status-label { font-size: 12px; color: var(--text-dim); }
+
+  /* ── Tabs ─────────────────────────────────────────────────── */
+  .tabs {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border);
+    padding: 0 24px; background: var(--bg);
+  }
+  .tab {
+    padding: 10px 18px; cursor: pointer; color: var(--text-dim);
+    border-bottom: 2px solid transparent; transition: all 0.15s;
+    font-size: 13px; user-select: none;
+  }
+  .tab:hover { color: var(--text); background: var(--surface); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ── Content panels ──────────────────────────────────────── */
+  .panel { display: none; padding: 24px; }
+  .panel.active { display: block; }
+
+  /* ── Stat cards ──────────────────────────────────────────── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px;
+    transition: border-color 0.15s;
+  }
+  .stat-card:hover { border-color: var(--text-faint); }
+  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  /* ── Chart ───────────────────────────────────────────────── */
+  .chart-wrapper {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; position: relative;
+  }
+  .chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .chart-header h2 { font-size: 14px; color: var(--text-dim); font-weight: 500; }
+  .chart-controls { display: flex; gap: 8px; align-items: center; }
+  .chart-controls select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font-family: var(--font); font-size: 12px;
+    cursor: pointer; outline: none;
+  }
+  .chart-controls select:focus { border-color: var(--border-focus); }
+  #elo-chart { width: 100%; height: 360px; cursor: crosshair; }
+
+  /* ── Tooltip ─────────────────────────────────────────────── */
+  .chart-tooltip {
+    display: none; position: absolute; pointer-events: none;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; font-size: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 10;
+    max-width: 300px; line-height: 1.5;
+  }
+  .chart-tooltip .tt-hash { color: var(--accent); }
+  .chart-tooltip .tt-elo { font-weight: 700; }
+  .chart-tooltip .tt-elo.pos { color: var(--green); }
+  .chart-tooltip .tt-elo.neg { color: var(--red); }
+  .chart-tooltip .tt-msg { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+  .chart-tooltip .tt-games { color: var(--text-faint); }
+
+  /* ── Jobs table ──────────────────────────────────────────── */
+  .table-wrapper {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; padding: 10px 14px; font-size: 11px;
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border); background: var(--bg);
+    position: sticky; top: 0;
+  }
+  td { padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  tr:hover td { background: var(--surface-hover); }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 500;
+  }
+  .badge-running { background: #1f3a1f; color: var(--green); }
+  .badge-queued  { background: #1f2a3f; color: var(--accent); }
+  .badge-completed { background: #1f1f2a; color: var(--text-dim); }
+  .badge-failed  { background: #3a1f1f; color: var(--red); }
+  .badge-cancelled { background: #2a2a1f; color: var(--yellow); }
+  .badge-h1 { background: #1f3a1f; color: var(--green); }
+  .badge-h0 { background: #3a1f1f; color: var(--red); }
+  .badge-inconclusive { background: #1f2a3f; color: var(--accent); }
+
+  .elo-positive { color: var(--green); }
+  .elo-negative { color: var(--red); }
+  .mono { font-variant-numeric: tabular-nums; }
+
+  /* ── Bisect ──────────────────────────────────────────────── */
+  .bisect-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  }
+  .bisect-card h3 { font-size: 14px; margin-bottom: 12px; }
+  .bisect-track {
+    display: flex; align-items: center; gap: 2px; margin: 16px 0;
+    padding: 12px; background: var(--bg); border-radius: 6px; overflow-x: auto;
+  }
+  .bisect-dot {
+    width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid var(--border);
+  }
+  .bisect-dot.good { background: var(--green); border-color: var(--green); }
+  .bisect-dot.bad { background: var(--red); border-color: var(--red); }
+  .bisect-dot.uncertain { background: var(--yellow); border-color: var(--yellow); }
+  .bisect-dot.pending { background: transparent; }
+  .bisect-dot.culprit { background: var(--red); border-color: var(--yellow); box-shadow: 0 0 8px var(--red); }
+  .bisect-connector { width: 8px; height: 2px; background: var(--border); flex-shrink: 0; }
+  .bisect-meta { color: var(--text-dim); font-size: 12px; }
+  .bisect-meta span { margin-right: 16px; }
+
+  /* ── Empty state ─────────────────────────────────────────── */
+  .empty-state {
+    text-align: center; padding: 60px 20px; color: var(--text-dim);
+  }
+  .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.5; }
+  .empty-state p { font-size: 13px; }
+
+  /* ── Responsive ──────────────────────────────────────────── */
+  @media (max-width: 768px) {
+    .header { padding: 12px 16px; }
+    .tabs { padding: 0 16px; overflow-x: auto; }
+    .panel { padding: 16px; }
+    .grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>&#9876; Crucible <span>Chess Engine CI</span></h1>
+  <div class="header-right">
+    <span class="status-label" id="uptime"></span>
+    <span class="status-dot ok" id="status-dot"></span>
+    <span class="status-label" id="status-label">Connected</span>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="timeline">Elo Timeline</div>
+  <div class="tab" data-tab="jobs">Jobs</div>
+  <div class="tab" data-tab="bisect">Bisect</div>
+</div>
+
+<!-- ── Dashboard ──────────────────────────────────────────── -->
+<div class="panel active" id="panel-dashboard">
+  <div class="grid">
+    <div class="stat-card">
+      <div class="label">Engines Tracked</div>
+      <div class="value" id="stat-engines" style="color:var(--accent)">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Active Tests</div>
+      <div class="value" id="stat-active" style="color:var(--yellow)">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Queued</div>
+      <div class="value" id="stat-queued" style="color:var(--text-dim)">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Games Played</div>
+      <div class="value" id="stat-games" style="color:var(--green)">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Games / min</div>
+      <div class="value" id="stat-rate" style="color:var(--text-dim)">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Completed Jobs</div>
+      <div class="value" id="stat-completed" style="color:var(--text-dim)">-</div>
+    </div>
+  </div>
+
+  <div class="chart-wrapper">
+    <div class="chart-header">
+      <h2>Elo Timeline</h2>
+      <div class="chart-controls">
+        <select id="dash-engine-select"><option value="">Select engine...</option></select>
+      </div>
+    </div>
+    <canvas id="dash-elo-chart"></canvas>
+    <div class="chart-tooltip" id="dash-tooltip"></div>
+  </div>
+</div>
+
+<!-- ── Elo Timeline (dedicated) ───────────────────────────── -->
+<div class="panel" id="panel-timeline">
+  <div class="chart-wrapper">
+    <div class="chart-header">
+      <h2>Elo Timeline</h2>
+      <div class="chart-controls">
+        <select id="tl-engine-select"><option value="">Select engine...</option></select>
+      </div>
+    </div>
+    <canvas id="tl-elo-chart"></canvas>
+    <div class="chart-tooltip" id="tl-tooltip"></div>
+  </div>
+</div>
+
+<!-- ── Jobs ────────────────────────────────────────────────── -->
+<div class="panel" id="panel-jobs">
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Engine</th>
+          <th>Dev</th>
+          <th>Base</th>
+          <th>Type</th>
+          <th>W / D / L</th>
+          <th>Elo</th>
+          <th>SPRT</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody id="jobs-body"></tbody>
+    </table>
+  </div>
+  <div class="empty-state" id="jobs-empty" style="display:none">
+    <div class="icon">&#128203;</div>
+    <p>No jobs yet. Jobs appear here once engines are configured and commits are detected.</p>
+  </div>
+</div>
+
+<!-- ── Bisect ─────────────────────────────────────────────── -->
+<div class="panel" id="panel-bisect">
+  <div id="bisect-list"></div>
+  <div class="empty-state" id="bisect-empty">
+    <div class="icon">&#128270;</div>
+    <p>No active bisect sessions. Start one from the CLI to hunt down a regression.</p>
+  </div>
+</div>
+
+<script>
+  // ── Tab switching ──────────────────────────────────────────
+  const tabs = document.querySelectorAll('.tab');
+  const panels = document.querySelectorAll('.panel');
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab;
+      tabs.forEach(t => t.classList.remove('active'));
+      panels.forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('panel-' + target).classList.add('active');
+
+      // Load data for the tab on first visit
+      if (target === 'jobs') loadJobs();
+      if (target === 'bisect') loadBisect();
+      if (target === 'timeline') loadTimeline('tl');
+    });
+  });
+
+  // ── State ──────────────────────────────────────────────────
+  let engines = [];
+  let chartDataCache = {};
+
+  // ── API helpers ────────────────────────────────────────────
+  async function api(path) {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(res.statusText);
+    return res.json();
+  }
+
+  // ── Status polling ─────────────────────────────────────────
+  async function updateStatus() {
+    try {
+      const data = await api('/api/status');
+      document.getElementById('stat-engines').textContent = data.engines_tracked;
+      document.getElementById('stat-active').textContent = data.active_jobs;
+      document.getElementById('stat-queued').textContent = data.queued_jobs;
+      document.getElementById('stat-games').textContent = data.total_games_played.toLocaleString();
+      document.getElementById('stat-rate').textContent = data.games_per_minute.toFixed(1);
+      document.getElementById('stat-completed').textContent = data.completed_jobs;
+      document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
+      setConnected(true);
+    } catch(e) {
+      setConnected(false);
+    }
+  }
+
+  function setConnected(ok) {
+    const dot = document.getElementById('status-dot');
+    const label = document.getElementById('status-label');
+    dot.className = 'status-dot ' + (ok ? 'ok' : 'err');
+    label.textContent = ok ? 'Connected' : 'Disconnected';
+  }
+
+  function formatUptime(s) {
+    if (!s) return '';
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+  }
+
+  // ── Engine list ────────────────────────────────────────────
+  async function loadEngines() {
+    try {
+      engines = await api('/api/engines');
+      populateSelect('dash-engine-select', engines);
+      populateSelect('tl-engine-select', engines);
+      if (engines.length > 0) {
+        document.getElementById('dash-engine-select').value = engines[0].id;
+        document.getElementById('tl-engine-select').value = engines[0].id;
+        loadTimeline('dash');
+      }
+    } catch(e) { /* ignore */ }
+  }
+
+  function populateSelect(id, engines) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">Select engine...</option>';
+    engines.forEach(e => {
+      const opt = document.createElement('option');
+      opt.value = e.id;
+      opt.textContent = e.name;
+      sel.appendChild(opt);
+    });
+  }
+
+  // ── Elo chart ──────────────────────────────────────────────
+  document.getElementById('dash-engine-select').addEventListener('change', () => loadTimeline('dash'));
+  document.getElementById('tl-engine-select').addEventListener('change', () => loadTimeline('tl'));
+
+  async function loadTimeline(prefix) {
+    const sel = document.getElementById(prefix + '-engine-select');
+    const engineId = sel.value;
+    if (!engineId) return;
+
+    let dataPoints;
+    if (chartDataCache[engineId]) {
+      dataPoints = chartDataCache[engineId];
+    } else {
+      try {
+        dataPoints = await api('/api/timeline/' + encodeURIComponent(engineId));
+        chartDataCache[engineId] = dataPoints;
+      } catch(e) { dataPoints = []; }
+    }
+
+    const canvas = document.getElementById(prefix + '-elo-chart');
+    const tooltip = document.getElementById(prefix + '-tooltip');
+    drawEloChart(canvas, tooltip, dataPoints);
+  }
+
+  function drawEloChart(canvas, tooltipEl, dataPoints) {
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.offsetWidth;
+    const h = canvas.offsetHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.scale(dpr, dpr);
+
+    const pad = { top: 24, right: 24, bottom: 44, left: 64 };
+    const cw = w - pad.left - pad.right;
+    const ch = h - pad.top - pad.bottom;
+
+    ctx.clearRect(0, 0, w, h);
+
+    if (!dataPoints || dataPoints.length === 0) {
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '13px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('No data yet \u2014 waiting for test results...', w / 2, h / 2);
+      // Clear any prior mouse handler
+      canvas.onmousemove = null;
+      canvas.onmouseleave = null;
+      return;
+    }
+
+    const elos = dataPoints.map(d => d.elo);
+    const errors = dataPoints.map(d => d.elo_error || 0);
+    const minElo = Math.min(...elos.map((e, i) => e - errors[i])) - 8;
+    const maxElo = Math.max(...elos.map((e, i) => e + errors[i])) + 8;
+    const eloRange = maxElo - minElo || 1;
+
+    function xFor(i) { return pad.left + (cw * i / Math.max(dataPoints.length - 1, 1)); }
+    function yFor(elo) { return pad.top + ch * (1 - (elo - minElo) / eloRange); }
+
+    // Grid lines
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    const gridLines = 6;
+    for (let i = 0; i <= gridLines; i++) {
+      const y = Math.round(pad.top + ch * i / gridLines) + 0.5;
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+    }
+
+    // Zero line
+    if (minElo < 0 && maxElo > 0) {
+      const zy = Math.round(yFor(0)) + 0.5;
+      ctx.strokeStyle = '#58a6ff33';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath(); ctx.moveTo(pad.left, zy); ctx.lineTo(w - pad.right, zy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Error band (confidence interval)
+    ctx.fillStyle = '#58a6ff0d';
+    ctx.beginPath();
+    dataPoints.forEach((d, i) => {
+      const x = xFor(i);
+      const y = yFor(d.elo + (d.elo_error || 0));
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    for (let i = dataPoints.length - 1; i >= 0; i--) {
+      ctx.lineTo(xFor(i), yFor(dataPoints[i].elo - (dataPoints[i].elo_error || 0)));
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Main line
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    dataPoints.forEach((d, i) => {
+      const x = xFor(i), y = yFor(d.elo);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Data points
+    dataPoints.forEach((d, i) => {
+      const x = xFor(i), y = yFor(d.elo);
+      const r = d.is_release ? 5 : (d.tag ? 4 : 3);
+      ctx.fillStyle = d.is_release ? '#d29922' : (d.tag ? '#3fb950' : '#58a6ff');
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Y-axis labels
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= gridLines; i++) {
+      const elo = maxElo - (eloRange * i / gridLines);
+      const y = pad.top + ch * i / gridLines;
+      ctx.fillText(elo.toFixed(0), pad.left - 10, y);
+    }
+
+    // X-axis labels (show a few commit hashes)
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const step = Math.max(1, Math.floor(dataPoints.length / 8));
+    for (let i = 0; i < dataPoints.length; i += step) {
+      ctx.fillText(dataPoints[i].commit_hash.substring(0, 7), xFor(i), h - pad.bottom + 8);
+    }
+    // Always show last
+    if (dataPoints.length > 1) {
+      const last = dataPoints.length - 1;
+      ctx.fillText(dataPoints[last].commit_hash.substring(0, 7), xFor(last), h - pad.bottom + 8);
+    }
+
+    // ── Hover interaction ──────────────────────────────────
+    const pointPositions = dataPoints.map((d, i) => ({ x: xFor(i), y: yFor(d.elo), i }));
+
+    canvas.onmousemove = function(e) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      let closest = null, bestDist = 30;
+      pointPositions.forEach(p => {
+        const dist = Math.hypot(mx - p.x, my - p.y);
+        if (dist < bestDist) { bestDist = dist; closest = p; }
+      });
+
+      if (closest) {
+        const d = dataPoints[closest.i];
+        const sign = d.elo >= 0 ? '+' : '';
+        const cls = d.elo >= 0 ? 'pos' : 'neg';
+        tooltipEl.innerHTML =
+          '<span class="tt-hash">' + d.commit_hash.substring(0, 8) + '</span>' +
+          (d.tag ? ' <span style="color:var(--green)">' + d.tag + '</span>' : '') +
+          '<br><span class="tt-elo ' + cls + '">' + sign + d.elo.toFixed(1) + ' \u00b1 ' + d.elo_error.toFixed(1) + ' Elo</span>' +
+          '<br><span class="tt-msg">' + escHtml(d.commit_message) + '</span>' +
+          '<br><span class="tt-games">' + d.games_played + ' games</span>';
+
+        const tw = tooltipEl.offsetWidth || 200;
+        let tx = closest.x + 12;
+        if (tx + tw > w - 10) tx = closest.x - tw - 12;
+        let ty = closest.y - 40;
+        if (ty < 4) ty = closest.y + 12;
+
+        tooltipEl.style.display = 'block';
+        tooltipEl.style.left = tx + 'px';
+        tooltipEl.style.top = ty + 'px';
+      } else {
+        tooltipEl.style.display = 'none';
+      }
+    };
+
+    canvas.onmouseleave = function() {
+      tooltipEl.style.display = 'none';
+    };
+  }
+
+  function escHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Jobs table ─────────────────────────────────────────────
+  async function loadJobs() {
+    try {
+      const data = await api('/api/jobs');
+      const jobs = data.jobs || [];
+      const tbody = document.getElementById('jobs-body');
+      const empty = document.getElementById('jobs-empty');
+
+      if (jobs.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+
+      tbody.innerHTML = jobs.map(j => {
+        const statusCls = 'badge-' + j.status.toLowerCase();
+        const hasResult = j.wins != null;
+        const wdl = hasResult ? j.wins + ' / ' + j.draws + ' / ' + j.losses : '-';
+        const elo = j.elo_diff != null
+          ? '<span class="' + (j.elo_diff >= 0 ? 'elo-positive' : 'elo-negative') + '">'
+            + (j.elo_diff >= 0 ? '+' : '') + j.elo_diff.toFixed(1)
+            + (j.elo_error != null ? ' \u00b1 ' + j.elo_error.toFixed(1) : '')
+            + '</span>'
+          : '-';
+        const sprt = j.sprt_result
+          ? '<span class="badge badge-' + j.sprt_result.toLowerCase() + '">' + j.sprt_result + '</span>'
+          : '-';
+        const created = timeAgo(j.created_at);
+
+        return '<tr>'
+          + '<td><span class="badge ' + statusCls + '">' + j.status + '</span></td>'
+          + '<td>' + escHtml(j.engine_name) + '</td>'
+          + '<td class="mono">' + j.dev_commit_hash.substring(0, 7) + '</td>'
+          + '<td class="mono">' + j.base_commit_hash.substring(0, 7) + '</td>'
+          + '<td>' + j.job_type + '</td>'
+          + '<td class="mono">' + wdl + '</td>'
+          + '<td class="mono">' + elo + '</td>'
+          + '<td>' + sprt + '</td>'
+          + '<td title="' + j.created_at + '">' + created + '</td>'
+          + '</tr>';
+      }).join('');
+    } catch(e) {
+      document.getElementById('jobs-empty').style.display = 'block';
+    }
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return '-';
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return Math.floor(diff) + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  }
+
+  // ── Bisect view ────────────────────────────────────────────
+  async function loadBisect() {
+    try {
+      const sessions = await api('/api/bisect');
+      const container = document.getElementById('bisect-list');
+      const empty = document.getElementById('bisect-empty');
+
+      if (!sessions || sessions.length === 0) {
+        container.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+
+      container.innerHTML = sessions.map(s => {
+        // Build the commit track visualization
+        const range = s.commit_range || [];
+        const probeMap = {};
+        (s.probe_history || []).forEach(p => { probeMap[p.index] = p.verdict; });
+
+        let trackHtml = '';
+        range.forEach((hash, i) => {
+          if (i > 0) trackHtml += '<div class="bisect-connector"></div>';
+          let cls = 'pending';
+          if (probeMap[i] === 'Good') cls = 'good';
+          else if (probeMap[i] === 'Bad') cls = 'bad';
+          else if (probeMap[i] === 'Uncertain') cls = 'uncertain';
+          if (s.culprit_revision_id && hash === s.culprit_revision_id) cls = 'culprit';
+          trackHtml += '<div class="bisect-dot ' + cls + '" title="' + hash.substring(0, 8) + ' — ' + (probeMap[i] || 'untested') + '"></div>';
+        });
+
+        const statusBadge = s.status === 'Found'
+          ? '<span class="badge badge-h1">Found</span>'
+          : s.status === 'Failed'
+            ? '<span class="badge badge-failed">Failed</span>'
+            : '<span class="badge badge-running">Running</span>';
+
+        return '<div class="bisect-card">'
+          + '<h3>' + statusBadge + ' Bisect on ' + escHtml(s.engine_id) + '</h3>'
+          + '<div class="bisect-meta">'
+          + '<span>Phase: ' + s.phase + '</span>'
+          + '<span>Range: ' + range.length + ' commits</span>'
+          + '<span>Probes: ' + (s.probe_history || []).length + '</span>'
+          + (s.culprit_revision_id ? '<span>Culprit: <span class="tt-hash">' + s.culprit_revision_id.substring(0, 8) + '</span></span>' : '')
+          + '</div>'
+          + '<div class="bisect-track">' + trackHtml + '</div>'
+          + '</div>';
+      }).join('');
+    } catch(e) {
+      document.getElementById('bisect-empty').style.display = 'block';
+    }
+  }
+
+  // ── Init ───────────────────────────────────────────────────
+  updateStatus();
+  loadEngines();
+  setInterval(updateStatus, 3000);
+  setInterval(() => { chartDataCache = {}; }, 30000); // refresh chart cache every 30s
+
+  // Redraw charts on resize
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const activePanel = document.querySelector('.panel.active');
+      if (activePanel.id === 'panel-dashboard') loadTimeline('dash');
+      if (activePanel.id === 'panel-timeline') loadTimeline('tl');
+    }, 200);
+  });
+</script>
+</body>
+</html>

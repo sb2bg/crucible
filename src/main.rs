@@ -13,7 +13,8 @@ use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
 use crucible::storage::Storage;
 use crucible::types::{
-    BisectStatus, BuildStatus, Engine, JobType, TestJob, TestResult, TestStatus, TimeControl,
+    BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
+    TimeControl,
 };
 
 #[derive(Parser)]
@@ -267,45 +268,40 @@ async fn main() -> Result<()> {
                 )?,
             )?;
 
-            match bisect_runner
-                .next_commit_to_test(&session)
-                .context("Bisect range did not produce a midpoint")?
-            {
-                BisectStep::Test {
+            match bisect_runner.next_commit_to_test(&mut session) {
+                Some(BisectStep::Test {
                     commit_hash,
-                    index,
                     remaining_range,
-                } => {
-                    let test_revision = storage
-                        .get_revision_by_hash_prefix(&engine.id, &commit_hash)?
-                        .with_context(|| {
-                            format!("Could not resolve bisect midpoint '{}'", commit_hash)
-                        })?;
-                    session.current_index = Some(index);
+                    ..
+                }) => {
+                    queue_bisect_probe(
+                        &storage,
+                        &bisect_runner,
+                        &mut session,
+                        &engine.id,
+                        &good_revision.id,
+                        &commit_hash,
+                        &config,
+                    )?;
                     storage.insert_bisect_session(&session)?;
 
-                    let job = bisect_runner.create_bisect_job(
-                        &engine.id,
-                        &test_revision.id,
-                        &good_revision.id,
-                        configured_time_control(&config),
-                    );
-                    storage.insert_test_job(&job)?;
-
                     println!(
-                        "Queued bisect for '{}' over {} commits.",
+                        "Queued regression hunt for '{}' over {} commits.",
                         engine.name, remaining_range
                     );
-                    println!(
-                        "First midpoint: {}",
-                        &test_revision.commit_hash[..8.min(test_revision.commit_hash.len())]
-                    );
+                    println!("First probe: {}", &commit_hash[..8.min(commit_hash.len())]);
                 }
-                BisectStep::Found { culprit } => {
+                Some(BisectStep::Found { culprit }) => {
                     println!(
-                        "Bisect range is already minimal. Suspected culprit: {}",
+                        "Range is already minimal. Suspected culprit revision: {}",
                         culprit
                     );
+                }
+                Some(BisectStep::Failed { reason }) => {
+                    println!("Could not start regression hunt: {}", reason);
+                }
+                None => {
+                    println!("No regression-hunt probe was scheduled.");
                 }
             }
         }
@@ -607,75 +603,61 @@ fn advance_bisect_after_job(
     }
 
     let sessions = storage.get_running_bisect_sessions()?;
-    let Some(mut session) = sessions.into_iter().find(|session| {
-        session.engine_id == job.engine_id
-            && session.current_index.is_some()
-            && session.good_revision_id == job.base_revision_id
-    }) else {
+    let Some(mut session) = sessions
+        .into_iter()
+        .find(|session| session.current_job_id.as_deref() == Some(job.id.as_str()))
+    else {
         return Ok(());
     };
-
-    let tested_index = session
-        .current_index
-        .context("Bisect session lost its midpoint index")?;
     let bisect_runner = BisectRunner::new(storage.clone());
 
-    let action = match result.sprt_result {
-        crucible::types::SprtResult::H1Accepted => {
-            bisect_runner.process_result(&mut session, tested_index, &job.dev_revision_id, true)
-        }
-        crucible::types::SprtResult::H0Accepted => {
-            bisect_runner.process_result(&mut session, tested_index, &job.dev_revision_id, false)
-        }
-        crucible::types::SprtResult::Inconclusive => {
-            session.status = BisectStatus::Failed;
-            session.current_index = None;
-            storage.update_bisect_session(&session)?;
-            return Ok(());
-        }
+    let verdict = match result.sprt_result {
+        crucible::types::SprtResult::H1Accepted => ProbeVerdict::Good,
+        crucible::types::SprtResult::H0Accepted => ProbeVerdict::Bad,
+        crucible::types::SprtResult::Inconclusive => ProbeVerdict::Uncertain,
     };
+    let action = bisect_runner.process_result(&mut session, &job.dev_revision_id, &job.id, verdict);
 
     match action {
         BisectAction::Found { culprit } => {
-            let culprit_revision = storage
-                .get_revision_by_hash_prefix(&session.engine_id, &culprit)?
-                .with_context(|| format!("Could not resolve culprit '{}'", culprit))?;
             session.status = BisectStatus::Found;
             session.current_index = None;
-            session.culprit_revision_id = Some(culprit_revision.id);
+            session.current_job_id = None;
+            session.culprit_revision_id = Some(culprit);
             storage.update_bisect_session(&session)?;
         }
         BisectAction::TestNext {
             commit_hash,
-            index,
             remaining,
+            phase,
+            ..
         } => {
-            let next_revision = storage
-                .get_revision_by_hash_prefix(&session.engine_id, &commit_hash)?
-                .with_context(|| {
-                    format!("Could not resolve next bisect commit '{}'", commit_hash)
-                })?;
-            session.current_index = Some(index);
+            let engine_id = session.engine_id.clone();
+            let baseline_revision_id = session.good_revision_id.clone();
+            queue_bisect_probe(
+                storage,
+                &bisect_runner,
+                &mut session,
+                &engine_id,
+                &baseline_revision_id,
+                &commit_hash,
+                config,
+            )?;
             storage.update_bisect_session(&session)?;
-
-            if !storage.has_test_job(
-                &session.engine_id,
-                &next_revision.id,
-                &session.good_revision_id,
-                JobType::Bisect,
-            )? {
-                let next_job = bisect_runner.create_bisect_job(
-                    &session.engine_id,
-                    &next_revision.id,
-                    &session.good_revision_id,
-                    configured_time_control(config),
-                );
-                storage.insert_test_job(&next_job)?;
-                info!(
-                    "Queued next bisect job for engine {} ({} commits remaining)",
-                    session.engine_id, remaining
-                );
-            }
+            info!(
+                "Queued next regression-hunt probe for engine {} ({:?}, {} commits in window)",
+                session.engine_id, phase, remaining
+            );
+        }
+        BisectAction::Failed { reason } => {
+            session.status = BisectStatus::Failed;
+            session.current_index = None;
+            session.current_job_id = None;
+            storage.update_bisect_session(&session)?;
+            warn!(
+                "Regression hunt failed for engine {}: {}",
+                session.engine_id, reason
+            );
         }
     }
 
@@ -688,15 +670,38 @@ fn mark_bisect_session_failed(storage: &Storage, job: &TestJob) -> Result<()> {
     }
 
     let sessions = storage.get_running_bisect_sessions()?;
-    if let Some(mut session) = sessions.into_iter().find(|session| {
-        session.engine_id == job.engine_id
-            && session.current_index.is_some()
-            && session.good_revision_id == job.base_revision_id
-    }) {
+    if let Some(mut session) = sessions
+        .into_iter()
+        .find(|session| session.current_job_id.as_deref() == Some(job.id.as_str()))
+    {
         session.status = BisectStatus::Failed;
         session.current_index = None;
+        session.current_job_id = None;
         storage.update_bisect_session(&session)?;
     }
 
+    Ok(())
+}
+
+fn queue_bisect_probe(
+    storage: &Storage,
+    bisect_runner: &BisectRunner,
+    session: &mut crucible::types::BisectSession,
+    engine_id: &str,
+    baseline_revision_id: &str,
+    commit_hash: &str,
+    config: &Config,
+) -> Result<()> {
+    let test_revision = storage
+        .get_revision_by_hash_prefix(engine_id, commit_hash)?
+        .with_context(|| format!("Could not resolve bisect probe '{}'", commit_hash))?;
+    let job = bisect_runner.create_bisect_job(
+        engine_id,
+        &test_revision.id,
+        baseline_revision_id,
+        configured_time_control(config),
+    );
+    session.current_job_id = Some(job.id.clone());
+    storage.insert_test_job(&job)?;
     Ok(())
 }

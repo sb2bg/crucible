@@ -210,14 +210,26 @@ pub struct EloDataPoint {
 pub struct BisectSession {
     pub id: String,
     pub engine_id: String,
-    /// The commit known to be "good" (strong)
+    /// Fixed known-good baseline used for all probes
     pub good_revision_id: String,
-    /// The commit known to be "bad" (weak/regressed)
+    /// User-supplied known-bad endpoint
     pub bad_revision_id: String,
-    /// All commits in the range being bisected
+    /// Current candidate window, inclusive of good and bad boundaries
     pub commit_range: Vec<String>,
-    /// Current index being tested
+    /// Current index being tested within commit_range
     pub current_index: Option<usize>,
+    /// Active bisect job id, if one is in flight
+    pub current_job_id: Option<String>,
+    /// Current search phase
+    pub phase: HuntPhase,
+    /// Remaining indices to probe in the current phase
+    pub pending_indices: Vec<usize>,
+    /// Recorded outcomes for prior probes
+    pub probe_history: Vec<ProbeRecord>,
+    /// Candidate under confirmation, if any
+    pub candidate_revision_id: Option<String>,
+    /// Candidate index under confirmation, if any
+    pub candidate_index: Option<usize>,
     pub status: BisectStatus,
     /// The commit identified as causing the regression
     pub culprit_revision_id: Option<String>,
@@ -228,6 +240,31 @@ pub enum BisectStatus {
     Running,
     Found,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HuntPhase {
+    Sampling,
+    Scanning,
+    Confirming,
+    Found,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProbeVerdict {
+    Good,
+    Bad,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeRecord {
+    pub commit_hash: String,
+    pub revision_id: String,
+    pub index: usize,
+    pub verdict: ProbeVerdict,
+    pub job_id: String,
 }
 
 /// Live status of the system

@@ -102,6 +102,12 @@ impl Storage {
                 bad_revision_id TEXT NOT NULL REFERENCES revisions(id),
                 commit_range TEXT NOT NULL,  -- JSON array
                 current_index INTEGER,
+                current_job_id TEXT,
+                phase TEXT NOT NULL DEFAULT '\"Sampling\"',
+                pending_indices TEXT NOT NULL DEFAULT '[]',
+                probe_history TEXT NOT NULL DEFAULT '[]',
+                candidate_revision_id TEXT,
+                candidate_index INTEGER,
                 status TEXT NOT NULL DEFAULT 'Running',
                 culprit_revision_id TEXT
             );
@@ -118,6 +124,34 @@ impl Storage {
                 ON games(test_job_id, game_number);
             ",
         )?;
+        self.ensure_bisect_column(&conn, "current_job_id", "TEXT")?;
+        self.ensure_bisect_column(&conn, "phase", "TEXT NOT NULL DEFAULT '\"Sampling\"'")?;
+        self.ensure_bisect_column(&conn, "pending_indices", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_bisect_column(&conn, "probe_history", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_bisect_column(&conn, "candidate_revision_id", "TEXT")?;
+        self.ensure_bisect_column(&conn, "candidate_index", "INTEGER")?;
+        Ok(())
+    }
+
+    fn ensure_bisect_column(
+        &self,
+        conn: &Connection,
+        column_name: &str,
+        column_sql: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(bisect_sessions)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == column_name) {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE bisect_sessions ADD COLUMN {} {}",
+                    column_name, column_sql
+                ),
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -575,8 +609,8 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO bisect_sessions
-             (id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, status, culprit_revision_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, current_job_id, phase, pending_indices, probe_history, candidate_revision_id, candidate_index, status, culprit_revision_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 session.id,
                 session.engine_id,
@@ -584,6 +618,12 @@ impl Storage {
                 session.bad_revision_id,
                 serde_json::to_string(&session.commit_range)?,
                 session.current_index.map(|i| i as i64),
+                session.current_job_id,
+                serde_json::to_string(&session.phase)?,
+                serde_json::to_string(&session.pending_indices)?,
+                serde_json::to_string(&session.probe_history)?,
+                session.candidate_revision_id,
+                session.candidate_index.map(|i| i as i64),
                 serde_json::to_string(&session.status)?,
                 session.culprit_revision_id,
             ],
@@ -599,14 +639,26 @@ impl Storage {
                  bad_revision_id = ?2,
                  commit_range = ?3,
                  current_index = ?4,
-                 status = ?5,
-                 culprit_revision_id = ?6
-             WHERE id = ?7",
+                 current_job_id = ?5,
+                 phase = ?6,
+                 pending_indices = ?7,
+                 probe_history = ?8,
+                 candidate_revision_id = ?9,
+                 candidate_index = ?10,
+                 status = ?11,
+                 culprit_revision_id = ?12
+             WHERE id = ?13",
             params![
                 session.good_revision_id,
                 session.bad_revision_id,
                 serde_json::to_string(&session.commit_range)?,
                 session.current_index.map(|i| i as i64),
+                session.current_job_id,
+                serde_json::to_string(&session.phase)?,
+                serde_json::to_string(&session.pending_indices)?,
+                serde_json::to_string(&session.probe_history)?,
+                session.candidate_revision_id,
+                session.candidate_index.map(|i| i as i64),
                 serde_json::to_string(&session.status)?,
                 session.culprit_revision_id,
                 session.id,
@@ -618,7 +670,7 @@ impl Storage {
     pub fn get_running_bisect_sessions(&self) -> Result<Vec<BisectSession>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, status, culprit_revision_id
+            "SELECT id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, current_job_id, phase, pending_indices, probe_history, candidate_revision_id, candidate_index, status, culprit_revision_id
              FROM bisect_sessions
              WHERE status = ?1",
         )?;
@@ -628,8 +680,12 @@ impl Storage {
                 params![serde_json::to_string(&BisectStatus::Running)?],
                 |row| {
                     let commit_range: String = row.get(4)?;
-                    let status: String = row.get(6)?;
+                    let phase: String = row.get(7)?;
+                    let pending_indices: String = row.get(8)?;
+                    let probe_history: String = row.get(9)?;
+                    let status: String = row.get(12)?;
                     let current_index: Option<i64> = row.get(5)?;
+                    let candidate_index: Option<i64> = row.get(11)?;
                     Ok(BisectSession {
                         id: row.get(0)?,
                         engine_id: row.get(1)?,
@@ -637,8 +693,14 @@ impl Storage {
                         bad_revision_id: row.get(3)?,
                         commit_range: serde_json::from_str(&commit_range).unwrap_or_default(),
                         current_index: current_index.map(|i| i as usize),
+                        current_job_id: row.get(6)?,
+                        phase: serde_json::from_str(&phase).unwrap_or(HuntPhase::Sampling),
+                        pending_indices: serde_json::from_str(&pending_indices).unwrap_or_default(),
+                        probe_history: serde_json::from_str(&probe_history).unwrap_or_default(),
+                        candidate_revision_id: row.get(10)?,
+                        candidate_index: candidate_index.map(|i| i as usize),
                         status: serde_json::from_str(&status).unwrap_or(BisectStatus::Running),
-                        culprit_revision_id: row.get(7)?,
+                        culprit_revision_id: row.get(13)?,
                     })
                 },
             )?

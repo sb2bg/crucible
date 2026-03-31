@@ -1,0 +1,44 @@
+[package]
+name = "crucible"
+version = "0.1.0"
+edition = "2021"
+description = "CI for chess engines — automated SPRT regression testing across your git history"
+license = "GPL-3.0"
+readme = "README.md"
+keywords = ["chess", "engine", "testing", "sprt", "uci"]
+categories = ["command-line-utilities", "games"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Git
+git2 = "0.19"
+
+# Web server
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+rand = "0.8"

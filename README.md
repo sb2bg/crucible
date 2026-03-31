@@ -48,6 +48,39 @@ crucible run --tui
 
 The web dashboard is available at `http://localhost:8877` by default.
 
+## Docker
+
+For containerized deployments, set `web_host = "0.0.0.0"` so the dashboard is reachable outside the container.
+
+```toml
+[server]
+web_host = "0.0.0.0"
+web_port = 8877
+```
+
+Then start Crucible with Docker Compose:
+
+```bash
+cargo run -- init
+docker compose up --build -d
+```
+
+The provided `docker-compose.yml` mounts:
+- `./crucible.toml` into `/work/crucible.toml`
+- a named Docker volume at `/work/.crucible` for the SQLite DB, cloned repos, and build artifacts
+
+If you prefer a direct `docker run`, use:
+
+```bash
+docker build -t crucible .
+docker run -d \
+  --name crucible \
+  -p 8877:8877 \
+  -v "$(pwd)/crucible.toml:/work/crucible.toml:ro" \
+  -v crucible-data:/work/.crucible \
+  crucible
+```
+
 ## Configuration
 
 Edit `crucible.toml`:
@@ -55,7 +88,7 @@ Edit `crucible.toml`:
 ```toml
 [server]
 web_port = 8877
-web_host = "127.0.0.1"
+web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
 
 [testing]
 concurrency = 4           # Test jobs to run in parallel
@@ -83,6 +116,15 @@ start_from = "v1.0.0"
 ```
 
 Entries under `[[engines]]` are imported automatically when `crucible run` starts.
+
+## CI/CD
+
+GitHub Actions now includes a workflow that:
+- runs `cargo fmt --check`, `cargo check --locked`, and `cargo test --locked`
+- builds the Docker image on pull requests
+- publishes the image to GHCR on pushes to `main` and version tags
+
+Published images go to `ghcr.io/<your-github-username>/crucible`.
 
 ## Commands
 

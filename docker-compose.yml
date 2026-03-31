@@ -1,0 +1,15 @@
+services:
+  crucible:
+    build:
+      context: .
+    image: ghcr.io/sb2bg/crucible:latest
+    restart: unless-stopped
+    ports:
+      - "8877:8877"
+    command: ["run", "--config", "/work/crucible.toml"]
+    volumes:
+      - ./crucible.toml:/work/crucible.toml:ro
+      - crucible-data:/work/.crucible
+
+volumes:
+  crucible-data:

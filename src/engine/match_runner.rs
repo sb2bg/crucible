@@ -393,7 +393,7 @@ fn resolve_no_move_result(board: &Board, is_white_turn: bool) -> GameResult {
 fn record_position(seen_positions: &mut HashMap<u64, u8>, board: &Board) -> u8 {
     let entry = seen_positions.entry(board.hash()).or_insert(0);
     *entry = entry.saturating_add(1);
-    *entry1
+    *entry
 }
 
 #[cfg(test)]

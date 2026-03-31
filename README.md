@@ -14,7 +14,7 @@ Crucible is built for the solo dev. One command, your machine, your engine, your
 
 - **Elo Timeline** — The main view. See your engine's estimated Elo across every commit, with confidence intervals. Tags and releases are highlighted.
 - **Automatic SPRT** — Each commit is tested against the previous one using the Sequential Probability Ratio Test. Testing stops as soon as statistical significance is reached.
-- **Bisect Mode** — Notice a regression? Point Crucible at a good commit and a bad commit, and it binary-searches for the exact commit that caused the drop.
+- **Regression Hunt** — Notice a regression? Point Crucible at a good commit and a bad commit, and it samples the range against a fixed baseline, narrows to the first bad window, and confirms the likely culprit.
 - **Smart Scheduling** — Branch HEADs and tagged releases are tested first. Older commits backfill in the background. New pushes jump the queue.
 - **Multi-Engine, Multi-Branch** — Track multiple engines and branches simultaneously.
 - **Dual UI** — Terminal (TUI) for quick monitoring, web dashboard for deep dives and charts.
@@ -93,7 +93,7 @@ start_from = "v1.0.0"
 | `crucible add ...`                                        | Add an engine to track            |
 | `crucible list`                                           | List tracked engines              |
 | `crucible status`                                         | Show current testing status       |
-| `crucible bisect --engine <n> --good <hash> --bad <hash>` | Find regression source            |
+| `crucible bisect --engine <n> --good <hash> --bad <hash>` | Start a regression hunt           |
 | `crucible test --engine <n> --dev <hash> --base <hash>`   | Manual one-off test               |
 
 ## How It Works
@@ -114,7 +114,7 @@ crucible (single Rust binary)
 ├── Match runner   — play games, handle time control
 ├── SPRT engine    — statistical testing
 ├── Scheduler      — smart job prioritization
-├── Bisect runner  — binary search for regressions
+├── Hunt runner    — sampled regression hunt + confirmation
 ├── Storage        — SQLite for all persistence
 ├── TUI            — ratatui terminal dashboard
 └── Web server     — axum + embedded HTML dashboard

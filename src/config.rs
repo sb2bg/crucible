@@ -199,9 +199,12 @@ impl Config {
         if path.exists() {
             let contents = std::fs::read_to_string(path)?;
             let config: Config = toml::from_str(&contents)?;
+            config.validate()?;
             Ok(config)
         } else {
-            Ok(Config::default())
+            let config = Config::default();
+            config.validate()?;
+            Ok(config)
         }
     }
 
@@ -230,5 +233,36 @@ impl Config {
             }],
         };
         toml::to_string_pretty(&example).unwrap()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.testing.concurrency == 0 {
+            anyhow::bail!("testing.concurrency must be at least 1");
+        }
+        if self.testing.max_games == 0 {
+            anyhow::bail!("testing.max_games must be at least 1");
+        }
+        if self.testing.hash_mb == 0 {
+            anyhow::bail!("testing.hash_mb must be at least 1");
+        }
+        if self.testing.engine_threads == 0 {
+            anyhow::bail!("testing.engine_threads must be at least 1");
+        }
+        if self.testing.time_control.base_ms == 0 && self.testing.time_control.nodes.is_none() {
+            anyhow::bail!("time control must specify positive base_ms or nodes");
+        }
+        if matches!(self.testing.time_control.nodes, Some(0)) {
+            anyhow::bail!("testing.time_control.nodes must be greater than 0 when set");
+        }
+        if self.testing.sprt.elo0 >= self.testing.sprt.elo1 {
+            anyhow::bail!("testing.sprt.elo0 must be less than elo1");
+        }
+        if !(0.0 < self.testing.sprt.alpha && self.testing.sprt.alpha < 1.0) {
+            anyhow::bail!("testing.sprt.alpha must be between 0 and 1");
+        }
+        if !(0.0 < self.testing.sprt.beta && self.testing.sprt.beta < 1.0) {
+            anyhow::bail!("testing.sprt.beta must be between 0 and 1");
+        }
+        Ok(())
     }
 }

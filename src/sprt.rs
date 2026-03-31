@@ -4,6 +4,8 @@
 //! confidence whether a change made the engine stronger or weaker, without
 //! having to play a fixed (huge) number of games.
 
+use anyhow::{bail, Result};
+
 use crate::types::SprtResult;
 
 /// SPRT bounds configuration
@@ -61,6 +63,23 @@ impl SprtBounds {
         let lower = (self.beta / (1.0 - self.alpha)).ln();
         let upper = ((1.0 - self.beta) / self.alpha).ln();
         (lower, upper)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !(0.0 < self.alpha && self.alpha < 1.0) {
+            bail!("SPRT alpha must be between 0 and 1");
+        }
+        if !(0.0 < self.beta && self.beta < 1.0) {
+            bail!("SPRT beta must be between 0 and 1");
+        }
+        if self.elo0 >= self.elo1 {
+            bail!("SPRT elo0 must be less than elo1");
+        }
+        Ok(())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_ok()
     }
 }
 
@@ -124,6 +143,9 @@ pub fn los(wins: u32, losses: u32) -> f64 {
 
 /// Run SPRT on the current WDL tallies
 pub fn sprt_test(wins: u32, draws: u32, losses: u32, bounds: &SprtBounds) -> SprtResult {
+    if !bounds.is_valid() {
+        return SprtResult::Inconclusive;
+    }
     let total = wins + draws + losses;
     if total < 4 {
         return SprtResult::Inconclusive;
@@ -229,5 +251,17 @@ mod tests {
         // Too few games
         let result = sprt_test(2, 1, 1, &bounds);
         assert_eq!(result, SprtResult::Inconclusive);
+    }
+
+    #[test]
+    fn test_invalid_bounds_are_rejected() {
+        let bounds = SprtBounds {
+            elo0: 5.0,
+            elo1: 0.0,
+            alpha: 1.5,
+            beta: 0.05,
+        };
+        assert!(bounds.validate().is_err());
+        assert_eq!(sprt_test(100, 100, 100, &bounds), SprtResult::Inconclusive);
     }
 }

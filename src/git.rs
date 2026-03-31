@@ -11,6 +11,12 @@ use tracing::info;
 
 use crate::types::*;
 
+const DISPLAY_HASH_LEN: usize = 12;
+
+pub fn short_hash(hash: &str) -> &str {
+    &hash[..DISPLAY_HASH_LEN.min(hash.len())]
+}
+
 /// Manages git operations for a single engine repository
 pub struct GitManager {
     pub repo_url: String,
@@ -112,7 +118,7 @@ impl GitManager {
                 .with_timezone(&chrono::Utc);
 
             let rev = EngineRevision {
-                id: format!("{}-{}", engine_id, &hash[..8]),
+                id: format!("{}-{}", engine_id, hash),
                 engine_id: engine_id.to_string(),
                 commit_hash: hash,
                 commit_message: message,
@@ -152,16 +158,10 @@ impl GitManager {
     pub fn build_revision(&self, repo: &Repository, commit_hash: &str) -> Result<PathBuf> {
         // Checkout the commit
         let oid = git2::Oid::from_str(commit_hash)?;
-        let commit = repo.find_commit(oid)?;
-        let tree = commit.tree()?;
-
-        repo.checkout_tree(
-            tree.as_object(),
-            Some(git2::build::CheckoutBuilder::new().force()),
-        )?;
         repo.set_head_detached(oid)?;
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))?;
 
-        info!("Building commit {}...", &commit_hash[..8]);
+        info!("Building commit {}...", short_hash(commit_hash));
 
         // Run the build command
         let parts: Vec<&str> = self.build_cmd.split_whitespace().collect();
@@ -175,7 +175,7 @@ impl GitManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Build failed for {}: {}", &commit_hash[..8], stderr);
+            anyhow::bail!("Build failed for {}: {}", short_hash(commit_hash), stderr);
         }
 
         // Copy the built binary to a versioned location
@@ -186,7 +186,7 @@ impl GitManager {
 
         let dest_dir = self.local_path.join(".crucible-builds");
         std::fs::create_dir_all(&dest_dir)?;
-        let dest = dest_dir.join(format!("engine-{}", &commit_hash[..8]));
+        let dest = dest_dir.join(format!("engine-{}", short_hash(commit_hash)));
         std::fs::copy(&src_binary, &dest)?;
 
         // Make it executable on Unix
@@ -198,7 +198,7 @@ impl GitManager {
             std::fs::set_permissions(&dest, perms)?;
         }
 
-        info!("Built {} -> {:?}", &commit_hash[..8], dest);
+        info!("Built {} -> {:?}", short_hash(commit_hash), dest);
         Ok(dest)
     }
 
@@ -208,7 +208,6 @@ impl GitManager {
         repo: &Repository,
         old_hash: &str,
         new_hash: &str,
-        _engine_id: &str,
     ) -> Result<Vec<String>> {
         let old_oid = git2::Oid::from_str(old_hash)?;
         let new_oid = git2::Oid::from_str(new_hash)?;

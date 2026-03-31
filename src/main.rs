@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
 use crucible::config::Config;
 use crucible::engine::match_runner::{run_match, MatchConfig};
-use crucible::git::GitManager;
+use crucible::git::{short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
 use crucible::storage::Storage;
@@ -264,7 +264,6 @@ async fn main() -> Result<()> {
                     &repo,
                     &good_revision.commit_hash,
                     &bad_revision.commit_hash,
-                    &engine.id,
                 )?,
             )?;
 
@@ -420,12 +419,11 @@ async fn run_test_loop(storage: Storage, config: Config) {
         }
 
         // 2. Process queued jobs
-        while let Ok(Some(job)) = storage.get_next_job() {
+        while let Ok(Some(job)) = storage.claim_next_job() {
             info!(
                 "Running job {} (dev={}, base={})",
                 job.id, job.dev_revision_id, job.base_revision_id
             );
-            let _ = storage.set_job_status(&job.id, crucible::types::TestStatus::Running);
 
             match execute_job(&storage, &config, &job).await {
                 Ok(result) => {
@@ -504,7 +502,11 @@ fn sync_engine_revisions(
                 storage.update_build_status(&revision.id, BuildStatus::Success, Some(&binary))?;
             }
             Err(err) => {
-                warn!("Build failed for {}: {}", &revision.commit_hash[..8], err);
+                warn!(
+                    "Build failed for {}: {}",
+                    short_hash(&revision.commit_hash),
+                    err
+                );
                 storage.update_build_status(&revision.id, BuildStatus::Failed, None)?;
             }
         }
@@ -531,6 +533,7 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         .with_context(|| format!("Revision '{}' is missing a built binary", base_revision.id))?;
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    configured_sprt_bounds(config, job.job_type).validate()?;
     run_match(
         MatchConfig {
             dev_binary,

@@ -11,19 +11,16 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::scheduler::priority;
-use crate::storage::Storage;
 use crate::types::*;
 
 const SAMPLE_WINDOW_MAX: usize = 6;
 const SAMPLE_TARGETS: [usize; 3] = [1, 2, 3];
 
-pub struct BisectRunner {
-    _storage: Storage,
-}
+pub struct BisectRunner;
 
 impl BisectRunner {
-    pub fn new(storage: Storage) -> Self {
-        Self { _storage: storage }
+    pub fn new(_storage: crate::storage::Storage) -> Self {
+        Self
     }
 
     /// Start a new regression hunt session.
@@ -495,6 +492,7 @@ pub enum BisectAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Storage;
 
     #[test]
     fn starts_large_ranges_in_sampling_mode() -> Result<()> {

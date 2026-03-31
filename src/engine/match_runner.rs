@@ -3,7 +3,7 @@
 //! Supports concurrent games, opening books, and real-time
 //! SPRT evaluation to stop early when a result is conclusive.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -251,6 +251,7 @@ fn play_game_blocking(
         let bestmove_line = if let Some(nodes) = tc.nodes {
             current.go_nodes(&position, &moves, nodes)?
         } else {
+            let remaining_before_move = if is_white_turn { wtime } else { btime };
             let turn_start = Instant::now();
             let bestmove_line = current.go_position(
                 &position,
@@ -266,6 +267,14 @@ fn play_game_blocking(
             } else {
                 btime = btime.saturating_sub(elapsed_ms);
             }
+            if elapsed_ms >= remaining_before_move {
+                let result = if is_white_turn {
+                    GameResult::BlackWin
+                } else {
+                    GameResult::WhiteWin
+                };
+                return Ok((result, pgn_moves, move_count));
+            }
             bestmove_line
         };
 
@@ -273,6 +282,9 @@ fn play_game_blocking(
 
         match bestmove {
             Some(mv) if mv != "(none)" && mv != "0000" => {
+                if !UciEngine::is_valid_move(&mv) {
+                    bail!("engine returned invalid move '{}'", mv);
+                }
                 if !pgn_moves.is_empty() {
                     pgn_moves.push(' ');
                 }

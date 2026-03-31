@@ -164,6 +164,26 @@ impl UciEngine {
         }
     }
 
+    pub fn is_valid_move(mv: &str) -> bool {
+        let bytes = mv.as_bytes();
+        if !(bytes.len() == 4 || bytes.len() == 5) {
+            return false;
+        }
+
+        let is_file = |b: u8| (b'a'..=b'h').contains(&b);
+        let is_rank = |b: u8| (b'1'..=b'8').contains(&b);
+
+        if !is_file(bytes[0]) || !is_rank(bytes[1]) || !is_file(bytes[2]) || !is_rank(bytes[3]) {
+            return false;
+        }
+
+        if bytes.len() == 5 {
+            matches!(bytes[4], b'q' | b'r' | b'b' | b'n')
+        } else {
+            true
+        }
+    }
+
     /// Quit the engine
     pub fn quit(&mut self) -> Result<()> {
         let _ = self.send_cmd("quit");
@@ -177,5 +197,19 @@ impl Drop for UciEngine {
         let _ = self.send_cmd("quit");
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UciEngine;
+
+    #[test]
+    fn validates_basic_uci_moves() {
+        assert!(UciEngine::is_valid_move("e2e4"));
+        assert!(UciEngine::is_valid_move("a7a8q"));
+        assert!(!UciEngine::is_valid_move("foo"));
+        assert!(!UciEngine::is_valid_move("e9e4"));
+        assert!(!UciEngine::is_valid_move("e2e4x"));
     }
 }

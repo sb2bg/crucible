@@ -123,8 +123,8 @@ impl Scheduler {
         }
 
         // Recency bonus: more recent commits get higher priority within their tier
-        let age_days = (Utc::now() - rev.commit_date).num_days();
-        let recency_bonus = (30 - age_days.min(30)) as i32; // 0-30 bonus
+        let age_days = (Utc::now() - rev.commit_date).num_days().clamp(0, 30);
+        let recency_bonus = 30 - age_days as i32; // 0-30 bonus
         if prio < priority::TAGGED_RELEASE {
             prio += recency_bonus;
         }

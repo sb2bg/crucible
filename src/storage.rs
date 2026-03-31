@@ -4,9 +4,10 @@
 //! The database is the source of truth for the Elo timeline.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::types::*;
 
@@ -17,7 +18,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = Self::open_connection(path)?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -26,7 +27,7 @@ impl Storage {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
+        let conn = Self::open_in_memory_connection()?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -34,9 +35,29 @@ impl Storage {
         Ok(storage)
     }
 
+    fn open_connection(path: &Path) -> Result<Connection> {
+        let conn = Connection::open(path)?;
+        Self::configure_connection(&conn)?;
+        Ok(conn)
+    }
+
+    fn open_in_memory_connection() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        Self::configure_connection(&conn)?;
+        Ok(conn)
+    }
+
+    fn configure_connection(conn: &Connection) -> Result<()> {
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS engines (
                 id TEXT PRIMARY KEY,
@@ -124,12 +145,38 @@ impl Storage {
                 ON games(test_job_id, game_number);
             ",
         )?;
-        self.ensure_bisect_column(&conn, "current_job_id", "TEXT")?;
-        self.ensure_bisect_column(&conn, "phase", "TEXT NOT NULL DEFAULT '\"Sampling\"'")?;
-        self.ensure_bisect_column(&conn, "pending_indices", "TEXT NOT NULL DEFAULT '[]'")?;
-        self.ensure_bisect_column(&conn, "probe_history", "TEXT NOT NULL DEFAULT '[]'")?;
-        self.ensure_bisect_column(&conn, "candidate_revision_id", "TEXT")?;
-        self.ensure_bisect_column(&conn, "candidate_index", "INTEGER")?;
+        self.ensure_bisect_column(&tx, "current_job_id", "TEXT")?;
+        self.ensure_bisect_column(&tx, "phase", "TEXT NOT NULL DEFAULT 'Sampling'")?;
+        self.ensure_bisect_column(&tx, "pending_indices", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_bisect_column(&tx, "probe_history", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_bisect_column(&tx, "candidate_revision_id", "TEXT")?;
+        self.ensure_bisect_column(&tx, "candidate_index", "INTEGER")?;
+        tx.execute_batch(
+            "
+            UPDATE revisions
+            SET build_status = trim(build_status, '\"')
+            WHERE build_status LIKE '\"%\"';
+
+            UPDATE test_jobs
+            SET status = trim(status, '\"'),
+                job_type = trim(job_type, '\"'),
+                sprt_result = trim(sprt_result, '\"')
+            WHERE status LIKE '\"%\"'
+               OR job_type LIKE '\"%\"'
+               OR sprt_result LIKE '\"%\"';
+
+            UPDATE games
+            SET result = trim(result, '\"')
+            WHERE result LIKE '\"%\"';
+
+            UPDATE bisect_sessions
+            SET status = trim(status, '\"'),
+                phase = trim(phase, '\"')
+            WHERE status LIKE '\"%\"'
+               OR phase LIKE '\"%\"';
+            ",
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -242,7 +289,7 @@ impl Storage {
                 rev.tag,
                 rev.is_release as i32,
                 rev.binary_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                serde_json::to_string(&rev.build_status)?,
+                encode_build_status(rev.build_status),
             ],
         )?;
         Ok(())
@@ -264,14 +311,12 @@ impl Storage {
                     engine_id: row.get(1)?,
                     commit_hash: row.get(2)?,
                     commit_message: row.get(3)?,
-                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
+                    commit_date: parse_timestamp_column(&date_str, 4)?,
                     branch: row.get(5)?,
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
-                    build_status: serde_json::from_str(&status_str).unwrap_or(BuildStatus::Pending),
+                    build_status: decode_build_status(&status_str)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -295,14 +340,12 @@ impl Storage {
                     engine_id: row.get(1)?,
                     commit_hash: row.get(2)?,
                     commit_message: row.get(3)?,
-                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
+                    commit_date: parse_timestamp_column(&date_str, 4)?,
                     branch: row.get(5)?,
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
-                    build_status: serde_json::from_str(&status_str).unwrap_or(BuildStatus::Pending),
+                    build_status: decode_build_status(&status_str)?,
                 })
             })
             .optional()?;
@@ -335,14 +378,12 @@ impl Storage {
                     engine_id: row.get(1)?,
                     commit_hash: row.get(2)?,
                     commit_message: row.get(3)?,
-                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
+                    commit_date: parse_timestamp_column(&date_str, 4)?,
                     branch: row.get(5)?,
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
-                    build_status: serde_json::from_str(&status_str).unwrap_or(BuildStatus::Pending),
+                    build_status: decode_build_status(&status_str)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -364,7 +405,7 @@ impl Storage {
         conn.execute(
             "UPDATE revisions SET build_status = ?1, binary_path = ?2 WHERE id = ?3",
             params![
-                serde_json::to_string(&status)?,
+                encode_build_status(status),
                 binary_path.map(|p| p.to_string_lossy().to_string()),
                 revision_id,
             ],
@@ -386,9 +427,9 @@ impl Storage {
                 job.base_revision_id,
                 serde_json::to_string(&job.time_control)?,
                 job.opening_book,
-                serde_json::to_string(&job.status)?,
+                encode_test_status(job.status),
                 job.priority,
-                serde_json::to_string(&job.job_type)?,
+                encode_job_type(job.job_type),
                 job.created_at.to_rfc3339(),
             ],
         )?;
@@ -413,43 +454,58 @@ impl Storage {
                 engine_id,
                 dev_revision_id,
                 base_revision_id,
-                serde_json::to_string(&job_type)?,
+                encode_job_type(job_type),
             ],
             |row| row.get(0),
         )?;
         Ok(count > 0)
     }
 
-    pub fn get_next_job(&self) -> Result<Option<TestJob>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, engine_id, dev_revision_id, base_revision_id, time_control, opening_book, status, priority, job_type, created_at
-             FROM test_jobs WHERE status = '\"Queued\"' ORDER BY priority DESC, created_at ASC LIMIT 1",
+    pub fn claim_next_job(&self) -> Result<Option<TestJob>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut stmt = tx.prepare(
+            "SELECT id, engine_id, dev_revision_id, base_revision_id, time_control, opening_book, status, priority, job_type, created_at, started_at, completed_at
+             FROM test_jobs
+             WHERE status = ?1
+             ORDER BY priority DESC, created_at ASC
+             LIMIT 1",
         )?;
-        let mut rows = stmt.query_map([], |row| {
-            let tc_str: String = row.get(4)?;
-            let status_str: String = row.get(6)?;
-            let jt_str: String = row.get(8)?;
-            let date_str: String = row.get(9)?;
-            Ok(TestJob {
-                id: row.get(0)?,
-                engine_id: row.get(1)?,
-                dev_revision_id: row.get(2)?,
-                base_revision_id: row.get(3)?,
-                time_control: serde_json::from_str(&tc_str).unwrap(),
-                opening_book: row.get(5)?,
-                status: serde_json::from_str(&status_str).unwrap(),
-                priority: row.get(7)?,
-                job_type: serde_json::from_str(&jt_str).unwrap(),
-                created_at: chrono::DateTime::parse_from_rfc3339(&date_str)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                started_at: None,
-                completed_at: None,
-                result: None,
-            })
-        })?;
-        Ok(rows.next().transpose()?)
+        let mut job = stmt
+            .query_row(
+                params![encode_test_status(TestStatus::Queued)],
+                map_test_job_row,
+            )
+            .optional()?;
+        drop(stmt);
+
+        let Some(mut job) = job.take() else {
+            tx.commit()?;
+            return Ok(None);
+        };
+
+        let now = chrono::Utc::now();
+        let changed = tx.execute(
+            "UPDATE test_jobs
+             SET status = ?1, started_at = ?2
+             WHERE id = ?3 AND status = ?4",
+            params![
+                encode_test_status(TestStatus::Running),
+                now.to_rfc3339(),
+                job.id,
+                encode_test_status(TestStatus::Queued),
+            ],
+        )?;
+
+        if changed == 1 {
+            tx.commit()?;
+            job.status = TestStatus::Running;
+            job.started_at = Some(now);
+            Ok(Some(job))
+        } else {
+            tx.rollback()?;
+            Ok(None)
+        }
     }
 
     pub fn update_job_result(
@@ -473,7 +529,7 @@ impl Storage {
                 elo_diff,
                 elo_error,
                 los,
-                serde_json::to_string(&sprt_result)?,
+                encode_sprt_result(sprt_result),
                 job_id,
             ],
         )?;
@@ -487,19 +543,19 @@ impl Storage {
             TestStatus::Running => {
                 conn.execute(
                     "UPDATE test_jobs SET status = ?1, started_at = ?2 WHERE id = ?3",
-                    params![serde_json::to_string(&status)?, now, job_id],
+                    params![encode_test_status(status), now, job_id],
                 )?;
             }
             TestStatus::Completed | TestStatus::Failed | TestStatus::Cancelled => {
                 conn.execute(
                     "UPDATE test_jobs SET status = ?1, completed_at = ?2 WHERE id = ?3",
-                    params![serde_json::to_string(&status)?, now, job_id],
+                    params![encode_test_status(status), now, job_id],
                 )?;
             }
             _ => {
                 conn.execute(
                     "UPDATE test_jobs SET status = ?1 WHERE id = ?2",
-                    params![serde_json::to_string(&status)?, job_id],
+                    params![encode_test_status(status), job_id],
                 )?;
             }
         }
@@ -516,7 +572,7 @@ impl Storage {
             params![
                 job_id,
                 record.game_number,
-                serde_json::to_string(&record.result)?,
+                encode_game_result(record.result),
                 record.pgn,
                 record.opening,
                 record.move_count,
@@ -573,29 +629,19 @@ impl Storage {
                     dev_commit_hash: row.get(4)?,
                     base_revision_id: row.get(5)?,
                     base_commit_hash: row.get(6)?,
-                    status: serde_json::from_str(&status_str).unwrap_or(TestStatus::Queued),
+                    status: decode_test_status(&status_str)?,
                     priority: row.get(8)?,
-                    job_type: serde_json::from_str(&job_type_str).unwrap_or(JobType::Sequential),
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
-                    started_at: started_at.map(|ts| {
-                        chrono::DateTime::parse_from_rfc3339(&ts)
-                            .unwrap()
-                            .with_timezone(&chrono::Utc)
-                    }),
-                    completed_at: completed_at.map(|ts| {
-                        chrono::DateTime::parse_from_rfc3339(&ts)
-                            .unwrap()
-                            .with_timezone(&chrono::Utc)
-                    }),
+                    job_type: decode_job_type(&job_type_str)?,
+                    created_at: parse_timestamp_column(&created_at, 10)?,
+                    started_at: parse_optional_timestamp_column(started_at, 11)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
                     wins: row.get(13)?,
                     losses: row.get(14)?,
                     draws: row.get(15)?,
                     elo_diff: row.get(16)?,
                     elo_error: row.get(17)?,
                     los: row.get(18)?,
-                    sprt_result: sprt_result.and_then(|s| serde_json::from_str(&s).ok()),
+                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -619,12 +665,12 @@ impl Storage {
                 serde_json::to_string(&session.commit_range)?,
                 session.current_index.map(|i| i as i64),
                 session.current_job_id,
-                serde_json::to_string(&session.phase)?,
+                encode_hunt_phase(session.phase),
                 serde_json::to_string(&session.pending_indices)?,
                 serde_json::to_string(&session.probe_history)?,
                 session.candidate_revision_id,
                 session.candidate_index.map(|i| i as i64),
-                serde_json::to_string(&session.status)?,
+                encode_bisect_status(session.status),
                 session.culprit_revision_id,
             ],
         )?;
@@ -654,12 +700,12 @@ impl Storage {
                 serde_json::to_string(&session.commit_range)?,
                 session.current_index.map(|i| i as i64),
                 session.current_job_id,
-                serde_json::to_string(&session.phase)?,
+                encode_hunt_phase(session.phase),
                 serde_json::to_string(&session.pending_indices)?,
                 serde_json::to_string(&session.probe_history)?,
                 session.candidate_revision_id,
                 session.candidate_index.map(|i| i as i64),
-                serde_json::to_string(&session.status)?,
+                encode_bisect_status(session.status),
                 session.culprit_revision_id,
                 session.id,
             ],
@@ -677,7 +723,7 @@ impl Storage {
 
         let sessions = stmt
             .query_map(
-                params![serde_json::to_string(&BisectStatus::Running)?],
+                params![encode_bisect_status(BisectStatus::Running)],
                 |row| {
                     let commit_range: String = row.get(4)?;
                     let phase: String = row.get(7)?;
@@ -694,12 +740,12 @@ impl Storage {
                         commit_range: serde_json::from_str(&commit_range).unwrap_or_default(),
                         current_index: current_index.map(|i| i as usize),
                         current_job_id: row.get(6)?,
-                        phase: serde_json::from_str(&phase).unwrap_or(HuntPhase::Sampling),
+                        phase: decode_hunt_phase(&phase)?,
                         pending_indices: serde_json::from_str(&pending_indices).unwrap_or_default(),
                         probe_history: serde_json::from_str(&probe_history).unwrap_or_default(),
                         candidate_revision_id: row.get(10)?,
                         candidate_index: candidate_index.map(|i| i as usize),
-                        status: serde_json::from_str(&status).unwrap_or(BisectStatus::Running),
+                        status: decode_bisect_status(&status)?,
                         culprit_revision_id: row.get(13)?,
                     })
                 },
@@ -722,14 +768,14 @@ impl Storage {
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN test_jobs j ON j.dev_revision_id = r.id
-             WHERE r.engine_id = ?1 AND r.branch = ?2 AND j.status = '\"Completed\"' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
+             WHERE r.engine_id = ?1 AND r.branch = ?2 AND j.status = 'Completed' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         } else {
             "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN test_jobs j ON j.dev_revision_id = r.id
-             WHERE r.engine_id = ?1 AND j.status = '\"Completed\"' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
+             WHERE r.engine_id = ?1 AND j.status = 'Completed' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         };
 
@@ -747,9 +793,7 @@ impl Storage {
                     revision_id: row.get(0)?,
                     commit_hash: row.get(1)?,
                     commit_message: row.get(2)?,
-                    commit_date: chrono::DateTime::parse_from_rfc3339(&date_str)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
+                    commit_date: parse_timestamp_column(&date_str, 3)?,
                     branch: row.get(4)?,
                     tag: row.get(5)?,
                     is_release: row.get::<_, i32>(6)? != 0,
@@ -768,17 +812,17 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
 
         let active: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Running\"'",
+            "SELECT COUNT(*) FROM test_jobs WHERE status = 'Running'",
             [],
             |r| r.get(0),
         )?;
         let queued: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Queued\"'",
+            "SELECT COUNT(*) FROM test_jobs WHERE status = 'Queued'",
             [],
             |r| r.get(0),
         )?;
         let completed: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM test_jobs WHERE status = '\"Completed\"'",
+            "SELECT COUNT(*) FROM test_jobs WHERE status = 'Completed'",
             [],
             |r| r.get(0),
         )?;
@@ -799,4 +843,194 @@ impl Storage {
             games_per_minute: 0.0,
         })
     }
+}
+
+fn map_test_job_row(row: &Row<'_>) -> rusqlite::Result<TestJob> {
+    let tc_str: String = row.get(4)?;
+    let status_str: String = row.get(6)?;
+    let jt_str: String = row.get(8)?;
+    let created_at: String = row.get(9)?;
+    let started_at: Option<String> = row.get(10)?;
+    let completed_at: Option<String> = row.get(11)?;
+    Ok(TestJob {
+        id: row.get(0)?,
+        engine_id: row.get(1)?,
+        dev_revision_id: row.get(2)?,
+        base_revision_id: row.get(3)?,
+        time_control: serde_json::from_str(&tc_str).map_err(json_column_error)?,
+        opening_book: row.get(5)?,
+        status: decode_test_status(&status_str)?,
+        priority: row.get(7)?,
+        job_type: decode_job_type(&jt_str)?,
+        created_at: parse_timestamp_column(&created_at, 9)?,
+        started_at: parse_optional_timestamp_column(started_at, 10)?,
+        completed_at: parse_optional_timestamp_column(completed_at, 11)?,
+        result: None,
+    })
+}
+
+fn parse_timestamp_column(
+    value: &str,
+    column_index: usize,
+) -> rusqlite::Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                column_index,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })
+}
+
+fn parse_optional_timestamp_column(
+    value: Option<String>,
+    column_index: usize,
+) -> rusqlite::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    value
+        .as_deref()
+        .map(|ts| parse_timestamp_column(ts, column_index))
+        .transpose()
+}
+
+fn json_column_error(err: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+fn normalize_db_enum(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+fn encode_build_status(value: BuildStatus) -> &'static str {
+    match value {
+        BuildStatus::Pending => "Pending",
+        BuildStatus::Building => "Building",
+        BuildStatus::Success => "Success",
+        BuildStatus::Failed => "Failed",
+    }
+}
+
+fn decode_build_status(value: &str) -> rusqlite::Result<BuildStatus> {
+    match normalize_db_enum(value) {
+        "Pending" => Ok(BuildStatus::Pending),
+        "Building" => Ok(BuildStatus::Building),
+        "Success" => Ok(BuildStatus::Success),
+        "Failed" => Ok(BuildStatus::Failed),
+        other => Err(invalid_enum_error("BuildStatus", other)),
+    }
+}
+
+fn encode_test_status(value: TestStatus) -> &'static str {
+    match value {
+        TestStatus::Queued => "Queued",
+        TestStatus::Running => "Running",
+        TestStatus::Completed => "Completed",
+        TestStatus::Cancelled => "Cancelled",
+        TestStatus::Failed => "Failed",
+    }
+}
+
+fn decode_test_status(value: &str) -> rusqlite::Result<TestStatus> {
+    match normalize_db_enum(value) {
+        "Queued" => Ok(TestStatus::Queued),
+        "Running" => Ok(TestStatus::Running),
+        "Completed" => Ok(TestStatus::Completed),
+        "Cancelled" => Ok(TestStatus::Cancelled),
+        "Failed" => Ok(TestStatus::Failed),
+        other => Err(invalid_enum_error("TestStatus", other)),
+    }
+}
+
+fn encode_job_type(value: JobType) -> &'static str {
+    match value {
+        JobType::Sequential => "Sequential",
+        JobType::Baseline => "Baseline",
+        JobType::Bisect => "Bisect",
+        JobType::Manual => "Manual",
+    }
+}
+
+fn decode_job_type(value: &str) -> rusqlite::Result<JobType> {
+    match normalize_db_enum(value) {
+        "Sequential" => Ok(JobType::Sequential),
+        "Baseline" => Ok(JobType::Baseline),
+        "Bisect" => Ok(JobType::Bisect),
+        "Manual" => Ok(JobType::Manual),
+        other => Err(invalid_enum_error("JobType", other)),
+    }
+}
+
+fn encode_sprt_result(value: SprtResult) -> &'static str {
+    match value {
+        SprtResult::Inconclusive => "Inconclusive",
+        SprtResult::H1Accepted => "H1Accepted",
+        SprtResult::H0Accepted => "H0Accepted",
+    }
+}
+
+fn decode_sprt_result(value: &str) -> rusqlite::Result<SprtResult> {
+    match normalize_db_enum(value) {
+        "Inconclusive" => Ok(SprtResult::Inconclusive),
+        "H1Accepted" => Ok(SprtResult::H1Accepted),
+        "H0Accepted" => Ok(SprtResult::H0Accepted),
+        other => Err(invalid_enum_error("SprtResult", other)),
+    }
+}
+
+fn encode_game_result(value: GameResult) -> &'static str {
+    match value {
+        GameResult::WhiteWin => "WhiteWin",
+        GameResult::BlackWin => "BlackWin",
+        GameResult::Draw => "Draw",
+    }
+}
+
+fn encode_bisect_status(value: BisectStatus) -> &'static str {
+    match value {
+        BisectStatus::Running => "Running",
+        BisectStatus::Found => "Found",
+        BisectStatus::Failed => "Failed",
+    }
+}
+
+fn decode_bisect_status(value: &str) -> rusqlite::Result<BisectStatus> {
+    match normalize_db_enum(value) {
+        "Running" => Ok(BisectStatus::Running),
+        "Found" => Ok(BisectStatus::Found),
+        "Failed" => Ok(BisectStatus::Failed),
+        other => Err(invalid_enum_error("BisectStatus", other)),
+    }
+}
+
+fn encode_hunt_phase(value: HuntPhase) -> &'static str {
+    match value {
+        HuntPhase::Sampling => "Sampling",
+        HuntPhase::Scanning => "Scanning",
+        HuntPhase::Confirming => "Confirming",
+        HuntPhase::Found => "Found",
+        HuntPhase::Failed => "Failed",
+    }
+}
+
+fn decode_hunt_phase(value: &str) -> rusqlite::Result<HuntPhase> {
+    match normalize_db_enum(value) {
+        "Sampling" => Ok(HuntPhase::Sampling),
+        "Scanning" => Ok(HuntPhase::Scanning),
+        "Confirming" => Ok(HuntPhase::Confirming),
+        "Found" => Ok(HuntPhase::Found),
+        "Failed" => Ok(HuntPhase::Failed),
+        other => Err(invalid_enum_error("HuntPhase", other)),
+    }
+}
+
+fn invalid_enum_error(kind: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        format!("invalid {} value '{}'", kind, value).into(),
+    )
 }

@@ -1,5 +1,7 @@
 # ⚗ Crucible
 
+[![Docker](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml)
+
 **CI for chess engines** — automated SPRT regression testing across your git history.
 
 Crucible continuously builds and tests every commit of your chess engine, showing you an Elo timeline so you always know which changes made your engine stronger or weaker. Think of it as what CI/CD is for software correctness, but for chess engine _strength_.

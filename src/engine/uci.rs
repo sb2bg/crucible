@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -124,6 +125,7 @@ impl UciEngine {
         winc: u64,
         binc: u64,
         timeout: Duration,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<String>> {
         let moves_str = if moves.is_empty() {
             String::new()
@@ -137,7 +139,7 @@ impl UciEngine {
             wtime, btime, winc, binc
         ))?;
 
-        self.wait_for_bestmove(timeout)
+        self.wait_for_bestmove(timeout, cancel_flag)
     }
 
     /// Search with a node limit
@@ -146,6 +148,7 @@ impl UciEngine {
         position: &str,
         moves: &[String],
         nodes: u64,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<String>> {
         let moves_str = if moves.is_empty() {
             String::new()
@@ -156,7 +159,7 @@ impl UciEngine {
         self.send_cmd(&format!("position {}{}", position, moves_str))?;
         self.send_cmd(&format!("go nodes {}", nodes))?;
 
-        self.wait_for_bestmove(Duration::from_secs(300))
+        self.wait_for_bestmove(Duration::from_secs(300), cancel_flag)
     }
 
     /// Parse "bestmove e2e4 ponder d7d5" -> "e2e4"
@@ -189,16 +192,30 @@ impl UciEngine {
         }
     }
 
-    fn wait_for_bestmove(&mut self, timeout: Duration) -> Result<Option<String>> {
+    fn wait_for_bestmove(
+        &mut self,
+        timeout: Duration,
+        cancel_flag: Option<&AtomicBool>,
+    ) -> Result<Option<String>> {
         let start = Instant::now();
         loop {
+            if cancel_flag.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                let _ = self.send_cmd("stop");
+                anyhow::bail!("search cancelled");
+            }
             if start.elapsed() >= timeout {
                 return Ok(None);
             }
             let remaining = timeout.saturating_sub(start.elapsed());
-            let line = match self.stdout_rx.recv_timeout(remaining) {
+            let slice = remaining.min(Duration::from_millis(100));
+            let line = match self.stdout_rx.recv_timeout(slice) {
                 Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Timeout) => {
+                    if start.elapsed() >= timeout {
+                        return Ok(None);
+                    }
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     anyhow::bail!("Engine '{}' exited while waiting for 'bestmove'", self.name);
                 }

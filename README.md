@@ -50,6 +50,8 @@ crucible run --tui
 
 The web dashboard is available at `http://localhost:8877` by default.
 
+The dashboard now includes an admin tab for adding/removing engines, queueing manual tests, starting regression hunts, and cancelling queued/running jobs. If you expose it beyond localhost, put it behind an auth layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control.
+
 ## Docker
 
 For containerized deployments, set `web_host = "0.0.0.0"` so the dashboard is reachable outside the container.
@@ -139,6 +141,7 @@ Published images go to `ghcr.io/<your-github-username>/crucible`.
 | `crucible monitor`                                        | Attach TUI to running instance    |
 | `crucible add ...`                                        | Add an engine to track            |
 | `crucible list`                                           | List tracked engines              |
+| `crucible remove --name <n> [--delete-data]`              | Remove a tracked engine           |
 | `crucible status`                                         | Show current testing status       |
 | `crucible bisect --engine <n> --good <hash> --bad <hash>` | Start a regression hunt           |
 | `crucible test --engine <n> --dev <hash> --base <hash>`   | Manual one-off test               |

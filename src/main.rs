@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -69,6 +71,16 @@ enum Commands {
     /// List tracked engines
     List,
 
+    /// Remove a tracked engine
+    Remove {
+        /// Engine name
+        #[arg(short, long)]
+        name: String,
+        /// Also delete the cloned repo and build artifacts under the data dir
+        #[arg(long)]
+        delete_data: bool,
+    },
+
     /// Start a bisect to find a regression
     Bisect {
         /// Engine name
@@ -133,9 +145,10 @@ async fn main() -> Result<()> {
             let web_storage = storage.clone();
             let web_host = config.server.web_host.clone();
             let web_port = config.server.web_port;
+            let web_config = config.clone();
 
             let _web_handle = tokio::spawn(async move {
-                let router = crucible::web::create_router(web_storage);
+                let router = crucible::web::create_router(web_storage, web_config);
                 let addr = format!("{}:{}", web_host, web_port);
                 info!("Web dashboard: http://{}", addr);
                 let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -222,6 +235,48 @@ async fn main() -> Result<()> {
                         e.branches.join(", ")
                     );
                 }
+            }
+        }
+
+        Commands::Remove { name, delete_data } => {
+            let storage = open_storage(&config)?;
+            let engine = storage
+                .get_engine_by_name(&name)?
+                .with_context(|| format!("Engine '{}' is not tracked", name))?;
+            let local_path = engine.local_path.clone();
+            let removed = storage.delete_engine(&engine.id)?;
+
+            if !removed {
+                anyhow::bail!("Engine '{}' is not tracked", name);
+            }
+
+            if delete_data && local_path.exists() {
+                std::fs::remove_dir_all(&local_path).with_context(|| {
+                    format!(
+                        "Failed to remove engine data directory '{}'",
+                        local_path.display()
+                    )
+                })?;
+            }
+
+            println!("Removed engine '{}'.", name);
+            if delete_data {
+                println!("Deleted local data at {}.", local_path.display());
+            } else {
+                println!(
+                    "Local repo/build data was kept at {}. Re-run with --delete-data to remove it.",
+                    local_path.display()
+                );
+            }
+            if config
+                .engines
+                .iter()
+                .any(|engine_cfg| engine_cfg.name == name)
+            {
+                println!(
+                    "Note: '{}' is still present in the config file and will be re-imported on the next run.",
+                    name
+                );
             }
         }
 
@@ -480,22 +535,38 @@ async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
 
     match execute_job(&storage, &config, &job).await {
         Ok(result) => {
+            if matches!(
+                storage.get_job_status(&job.id),
+                Ok(Some(TestStatus::Cancelled))
+            ) {
+                info!("Job {} was cancelled before results were persisted", job.id);
+                let _ = storage.mark_bisect_session_failed_for_job(&job.id);
+                return;
+            }
             if let Err(err) = persist_job_result(&storage, &job, &result) {
                 tracing::error!("Failed to persist job {}: {}", job.id, err);
                 let _ = storage.set_job_status(&job.id, TestStatus::Failed);
-                let _ = mark_bisect_session_failed(&storage, &job);
+                let _ = storage.mark_bisect_session_failed_for_job(&job.id);
                 return;
             }
 
             if let Err(err) = advance_bisect_after_job(&storage, &config, &job, &result) {
                 tracing::error!("Failed to advance bisect for job {}: {}", job.id, err);
-                let _ = mark_bisect_session_failed(&storage, &job);
+                let _ = storage.mark_bisect_session_failed_for_job(&job.id);
             }
         }
         Err(err) => {
+            if matches!(
+                storage.get_job_status(&job.id),
+                Ok(Some(TestStatus::Cancelled))
+            ) {
+                info!("Job {} cancelled", job.id);
+                let _ = storage.mark_bisect_session_failed_for_job(&job.id);
+                return;
+            }
             tracing::error!("Job {} failed: {}", job.id, err);
             let _ = storage.set_job_status(&job.id, TestStatus::Failed);
-            let _ = mark_bisect_session_failed(&storage, &job);
+            let _ = storage.mark_bisect_session_failed_for_job(&job.id);
         }
     }
 }
@@ -581,8 +652,28 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         .with_context(|| format!("Revision '{}' is missing a built binary", base_revision.id))?;
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_storage = storage.clone();
+    let cancel_job_id = job.id.clone();
+    let cancel_watch = {
+        let cancel_flag = cancel_flag.clone();
+        tokio::spawn(async move {
+            loop {
+                match cancel_storage.get_job_status(&cancel_job_id) {
+                    Ok(Some(TestStatus::Cancelled)) | Ok(None) => {
+                        cancel_flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    Ok(Some(TestStatus::Completed | TestStatus::Failed)) => break,
+                    Ok(Some(TestStatus::Queued | TestStatus::Running)) => {}
+                    Err(_) => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+    };
     configured_sprt_bounds(config, job.job_type).validate()?;
-    run_match(
+    let result = run_match(
         MatchConfig {
             dev_binary,
             base_binary,
@@ -596,10 +687,13 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
             max_games: config.testing.max_games,
             hash_mb: config.testing.hash_mb,
             threads: config.testing.engine_threads,
+            cancel_flag: Some(cancel_flag),
         },
         event_tx,
     )
-    .await
+    .await;
+    cancel_watch.abort();
+    result
 }
 
 fn load_opening_book(path: Option<&str>) -> Result<Option<Vec<String>>> {
@@ -710,25 +804,6 @@ fn advance_bisect_after_job(
                 session.engine_id, reason
             );
         }
-    }
-
-    Ok(())
-}
-
-fn mark_bisect_session_failed(storage: &Storage, job: &TestJob) -> Result<()> {
-    if job.job_type != JobType::Bisect {
-        return Ok(());
-    }
-
-    let sessions = storage.get_running_bisect_sessions()?;
-    if let Some(mut session) = sessions
-        .into_iter()
-        .find(|session| session.current_job_id.as_deref() == Some(job.id.as_str()))
-    {
-        session.status = BisectStatus::Failed;
-        session.current_index = None;
-        session.current_job_id = None;
-        storage.update_bisect_session(&session)?;
     }
 
     Ok(())

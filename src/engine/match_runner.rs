@@ -3,10 +3,12 @@
 //! Supports concurrent games, opening books, and real-time
 //! SPRT evaluation to stop early when a result is conclusive.
 
-use anyhow::{anyhow, bail, Result};
-use cozy_chess::{Board, GameStatus, Move};
+use anyhow::{anyhow, Result};
+use cozy_chess::{util::parse_uci_move, Board, GameStatus};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -51,6 +53,7 @@ pub struct MatchConfig {
     pub max_games: u32,
     pub hash_mb: u32,
     pub threads: u32,
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Run a full match between dev and base engines
@@ -70,6 +73,9 @@ pub async fn run_match(
     let mut game_number: u32 = 0;
 
     for opening in openings.iter().cycle() {
+        if is_cancelled(config.cancel_flag.as_deref()) {
+            anyhow::bail!("match cancelled");
+        }
         if game_number >= config.max_games {
             break;
         }
@@ -91,6 +97,7 @@ pub async fn run_match(
                 config.hash_mb,
                 config.threads,
                 swap,
+                config.cancel_flag.clone(),
             )
             .await;
 
@@ -120,6 +127,9 @@ pub async fn run_match(
                     });
                 }
                 Err(e) => {
+                    if is_cancelled(config.cancel_flag.as_deref()) {
+                        anyhow::bail!("match cancelled");
+                    }
                     error!("Game {} failed: {}", game_number, e);
                     let _ = event_tx.send(MatchEvent::Error {
                         message: format!("Game {} failed: {}", game_number, e),
@@ -188,6 +198,7 @@ async fn play_single_game(
     hash_mb: u32,
     threads: u32,
     swap_colors: bool,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(GameResult, String, u32)> {
     // Run in a blocking thread since UCI I/O is synchronous
     let dev = dev_binary.to_path_buf();
@@ -196,7 +207,16 @@ async fn play_single_game(
     let tc = tc.clone();
 
     tokio::task::spawn_blocking(move || {
-        play_game_blocking(&dev, &base, &opening, &tc, hash_mb, threads, swap_colors)
+        play_game_blocking(
+            &dev,
+            &base,
+            &opening,
+            &tc,
+            hash_mb,
+            threads,
+            swap_colors,
+            cancel_flag,
+        )
     })
     .await?
 }
@@ -209,6 +229,7 @@ fn play_game_blocking(
     hash_mb: u32,
     threads: u32,
     swap_colors: bool,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(GameResult, String, u32)> {
     let (white_bin, black_bin) = if swap_colors {
         (base_binary, dev_binary)
@@ -243,6 +264,9 @@ fn play_game_blocking(
     };
 
     loop {
+        if is_cancelled(cancel_flag.as_deref()) {
+            anyhow::bail!("match cancelled");
+        }
         if move_count >= max_moves {
             // Adjudicate as draw
             return Ok((GameResult::Draw, pgn_moves, move_count));
@@ -256,7 +280,16 @@ fn play_game_blocking(
         };
 
         let bestmove_line = if let Some(nodes) = tc.nodes {
-            current.go_nodes(&position, &moves, nodes)?
+            match current.go_nodes(&position, &moves, nodes, cancel_flag.as_deref()) {
+                Ok(line) => line,
+                Err(err) => {
+                    if is_cancelled(cancel_flag.as_deref()) {
+                        return Err(err);
+                    }
+                    error!("engine search failed: {}", err);
+                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                }
+            }
         } else {
             let remaining_before_move = if is_white_turn { wtime } else { btime };
             let turn_start = Instant::now();
@@ -268,7 +301,8 @@ fn play_game_blocking(
                 tc.increment_ms,
                 tc.increment_ms,
                 per_move_timeout(remaining_before_move, tc.increment_ms),
-            )?;
+                cancel_flag.as_deref(),
+            );
             let elapsed_ms = turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             if is_white_turn {
                 wtime = wtime.saturating_sub(elapsed_ms);
@@ -283,7 +317,16 @@ fn play_game_blocking(
                 };
                 return Ok((result, pgn_moves, move_count));
             }
-            bestmove_line
+            match bestmove_line {
+                Ok(line) => line,
+                Err(err) => {
+                    if is_cancelled(cancel_flag.as_deref()) {
+                        return Err(err);
+                    }
+                    error!("engine search failed: {}", err);
+                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                }
+            }
         };
 
         let Some(bestmove_line) = bestmove_line else {
@@ -300,13 +343,19 @@ fn play_game_blocking(
         match bestmove {
             Some(mv) if mv != "(none)" && mv != "0000" => {
                 if !UciEngine::is_valid_move(&mv) {
-                    bail!("engine returned invalid move '{}'", mv);
+                    error!("engine returned invalid move '{}'", mv);
+                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
                 }
-                let parsed_move = mv
-                    .parse::<Move>()
-                    .map_err(|_| anyhow!("engine returned unparsable move '{}'", mv))?;
+                let parsed_move = match parse_uci_move(&board, &mv) {
+                    Ok(parsed_move) => parsed_move,
+                    Err(_) => {
+                        error!("engine returned unparsable move '{}'", mv);
+                        return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                    }
+                };
                 if !board.is_legal(parsed_move) {
-                    bail!("engine returned illegal move '{}'", mv);
+                    error!("engine returned illegal move '{}'", mv);
+                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
                 }
                 if !pgn_moves.is_empty() {
                     pgn_moves.push(' ');
@@ -377,6 +426,18 @@ fn per_move_timeout(remaining_ms: u64, increment_ms: u64) -> Duration {
     )
 }
 
+fn is_cancelled(flag: Option<&AtomicBool>) -> bool {
+    flag.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+fn opponent_win(is_white_turn: bool) -> GameResult {
+    if is_white_turn {
+        GameResult::BlackWin
+    } else {
+        GameResult::WhiteWin
+    }
+}
+
 fn resolve_no_move_result(board: &Board, is_white_turn: bool) -> GameResult {
     match board.status() {
         GameStatus::Drawn => GameResult::Draw,
@@ -421,5 +482,13 @@ mod tests {
         assert_eq!(record_position(&mut seen_positions, &board), 1);
         assert_eq!(record_position(&mut seen_positions, &board), 2);
         assert_eq!(record_position(&mut seen_positions, &board), 3);
+    }
+
+    #[test]
+    fn parses_standard_uci_castling_for_cozy_chess() -> Result<()> {
+        let board = parse_opening_board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")?;
+        let mv = parse_uci_move(&board, "e1g1").map_err(|_| anyhow!("failed to parse castle"))?;
+        assert!(board.is_legal(mv));
+        Ok(())
     }
 }

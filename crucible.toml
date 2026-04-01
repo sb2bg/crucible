@@ -1,0 +1,27 @@
+[server]
+web_port = 8877
+web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+
+[testing]
+concurrency = 4           # Test jobs to run in parallel
+max_games = 10000          # Max games per test before giving up
+hash_mb = 16               # Hash table size for engines
+engine_threads = 1         # Threads per engine instance
+
+[testing.time_control]
+base_ms = 10000            # 10+0.1 STC
+increment_ms = 100
+
+[testing.sprt]
+elo0 = 0.0                 # H0: no improvement
+elo1 = 5.0                 # H1: 5 Elo improvement
+alpha = 0.05               # False positive rate
+beta = 0.05                # False negative rate
+
+[[engines]]
+name = "Sykora"
+repo = "https://github.com/sb2bg/sykora"
+branches = ["main"]
+build_cmd = "zig build -Doptimize=ReleaseFast"
+binary_path = "zig-out/bin/sykora"
+start_from = "v0.2.1"

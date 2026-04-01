@@ -3,670 +3,1479 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crucible — Chess Engine CI</title>
+<title>Crucible</title>
 <style>
   :root {
-    --bg: #0d1117; --surface: #161b22; --surface-hover: #1c2129;
-    --border: #30363d; --border-focus: #58a6ff;
-    --text: #e6edf3; --text-dim: #8b949e; --text-faint: #484f58;
-    --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922;
-    --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
-    --radius: 8px;
+    --bg: #0f141b;
+    --panel: #161d26;
+    --panel-2: #1b2430;
+    --panel-3: #111821;
+    --line: #283342;
+    --line-2: #334155;
+    --text: #e6edf6;
+    --muted: #93a1b5;
+    --accent: #4ea1ff;
+    --accent-2: #7db8ff;
+    --green: #38c172;
+    --yellow: #e3b341;
+    --red: #ff6b6b;
+    --shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --font-sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", monospace;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
 
-  /* ── Header ──────────────────────────────────────────────── */
-  .header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 24px; border-bottom: 1px solid var(--border);
-    background: var(--surface);
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
   }
-  .header h1 { font-size: 16px; color: var(--accent); letter-spacing: -0.5px; }
-  .header h1 span { color: var(--text-dim); font-weight: 400; font-size: 12px; margin-left: 8px; }
-  .header-right { display: flex; align-items: center; gap: 16px; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .status-dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
-  .status-label { font-size: 12px; color: var(--text-dim); }
 
-  /* ── Tabs ─────────────────────────────────────────────────── */
+  .app {
+    max-width: 1480px;
+    margin: 0 auto;
+    padding: 18px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+
+  .title-wrap {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+
+  .statusbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .chip,
+  .badge,
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    border: 1px solid var(--line);
+    background: var(--panel-3);
+    color: var(--text);
+  }
+
+  .status-pill.connected {
+    border-color: rgba(56, 193, 114, 0.28);
+    color: var(--green);
+  }
+
+  .status-pill.disconnected {
+    border-color: rgba(255, 107, 107, 0.28);
+    color: var(--red);
+  }
+
   .tabs {
-    display: flex; gap: 0; border-bottom: 1px solid var(--border);
-    padding: 0 24px; background: var(--bg);
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    margin-bottom: 14px;
   }
-  .tab {
-    padding: 10px 18px; cursor: pointer; color: var(--text-dim);
-    border-bottom: 2px solid transparent; transition: all 0.15s;
-    font-size: 13px; user-select: none;
-  }
-  .tab:hover { color: var(--text); background: var(--surface); }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-  /* ── Content panels ──────────────────────────────────────── */
-  .panel { display: none; padding: 24px; }
+  .tab {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .tab:hover {
+    border-color: var(--line-2);
+    color: var(--text);
+  }
+
+  .tab.active {
+    background: rgba(78, 161, 255, 0.12);
+    border-color: rgba(78, 161, 255, 0.35);
+    color: var(--accent-2);
+  }
+
+  .toast {
+    display: none;
+    margin-bottom: 14px;
+    padding: 11px 13px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+  }
+
+  .toast.success { display: block; border-color: rgba(56, 193, 114, 0.28); color: var(--green); background: rgba(56, 193, 114, 0.08); }
+  .toast.error { display: block; border-color: rgba(255, 107, 107, 0.28); color: var(--red); background: rgba(255, 107, 107, 0.08); }
+  .toast.info { display: block; border-color: rgba(227, 179, 65, 0.28); color: var(--yellow); background: rgba(227, 179, 65, 0.08); }
+
+  .panel {
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px;
+  }
+
   .panel.active { display: block; }
 
-  /* ── Stat cards ──────────────────────────────────────────── */
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 16px;
-    transition: border-color 0.15s;
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
   }
-  .stat-card:hover { border-color: var(--text-faint); }
-  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat-card .value { font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
 
-  /* ── Chart ───────────────────────────────────────────────── */
-  .chart-wrapper {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 20px; position: relative;
+  .panel-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
-  .chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .chart-header h2 { font-size: 14px; color: var(--text-dim); font-weight: 500; }
-  .chart-controls { display: flex; gap: 8px; align-items: center; }
-  .chart-controls select {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 10px; font-family: var(--font); font-size: 12px;
-    cursor: pointer; outline: none;
-  }
-  .chart-controls select:focus { border-color: var(--border-focus); }
-  #elo-chart { width: 100%; height: 360px; cursor: crosshair; }
 
-  /* ── Tooltip ─────────────────────────────────────────────── */
+  .panel-subtitle {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .stack { display: grid; gap: 14px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .stat {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+  }
+
+  .stat-label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .stat-value {
+    margin-top: 6px;
+    font-size: 28px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .split {
+    display: grid;
+    grid-template-columns: 1.65fr 0.95fr;
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 12px 0;
+  }
+
+  .card-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .card-body { padding: 12px; }
+
+  .chart-shell {
+    position: relative;
+    min-height: 380px;
+  }
+
+  .chart-canvas {
+    width: 100%;
+    height: 380px;
+    display: block;
+  }
+
   .chart-tooltip {
-    display: none; position: absolute; pointer-events: none;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 10px 12px; font-size: 12px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 10;
-    max-width: 300px; line-height: 1.5;
+    position: absolute;
+    display: none;
+    max-width: 300px;
+    pointer-events: none;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line-2);
+    background: rgba(9, 14, 20, 0.96);
+    box-shadow: var(--shadow);
+    font-size: 12px;
+    line-height: 1.5;
+    z-index: 5;
   }
-  .chart-tooltip .tt-hash { color: var(--accent); }
-  .chart-tooltip .tt-elo { font-weight: 700; }
-  .chart-tooltip .tt-elo.pos { color: var(--green); }
-  .chart-tooltip .tt-elo.neg { color: var(--red); }
-  .chart-tooltip .tt-msg { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
-  .chart-tooltip .tt-games { color: var(--text-faint); }
 
-  /* ── Jobs table ──────────────────────────────────────────── */
-  .table-wrapper {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); overflow: hidden;
+  .controls,
+  .inline-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
-  table { width: 100%; border-collapse: collapse; }
+
+  .engine-list,
+  .engine-admin-list,
+  .bisect-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .engine-row,
+  .bisect-card {
+    background: var(--panel-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+  }
+
+  .engine-row-head,
+  .bisect-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .engine-name {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .meta,
+  .mono,
+  code,
+  input,
+  textarea,
+  select,
+  table {
+    font-family: var(--font-mono);
+  }
+
+  .meta {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
+  .tag-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+
+  table {
+    width: 100%;
+    min-width: 1100px;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th,
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+  }
+
   th {
-    text-align: left; padding: 10px 14px; font-size: 11px;
-    color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
-    border-bottom: 1px solid var(--border); background: var(--bg);
-    position: sticky; top: 0;
+    background: var(--panel-3);
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    position: sticky;
+    top: 0;
   }
-  td { padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
-  tr:hover td { background: var(--surface-hover); }
+
+  tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.02);
+  }
 
   .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 11px; font-weight: 500;
+    padding: 5px 8px;
+    font-size: 11px;
   }
-  .badge-running { background: #1f3a1f; color: var(--green); }
-  .badge-queued  { background: #1f2a3f; color: var(--accent); }
-  .badge-completed { background: #1f1f2a; color: var(--text-dim); }
-  .badge-failed  { background: #3a1f1f; color: var(--red); }
-  .badge-cancelled { background: #2a2a1f; color: var(--yellow); }
-  .badge-h1 { background: #1f3a1f; color: var(--green); }
-  .badge-h0 { background: #3a1f1f; color: var(--red); }
-  .badge-inconclusive { background: #1f2a3f; color: var(--accent); }
 
-  .elo-positive { color: var(--green); }
-  .elo-negative { color: var(--red); }
-  .mono { font-variant-numeric: tabular-nums; }
+  .badge-running { color: var(--yellow); border-color: rgba(227, 179, 65, 0.24); background: rgba(227, 179, 65, 0.08); }
+  .badge-queued { color: var(--accent-2); border-color: rgba(78, 161, 255, 0.24); background: rgba(78, 161, 255, 0.08); }
+  .badge-completed { color: var(--green); border-color: rgba(56, 193, 114, 0.24); background: rgba(56, 193, 114, 0.08); }
+  .badge-cancelled { color: #c9d1d9; border-color: rgba(147, 161, 181, 0.22); background: rgba(147, 161, 181, 0.08); }
+  .badge-failed { color: var(--red); border-color: rgba(255, 107, 107, 0.24); background: rgba(255, 107, 107, 0.08); }
+  .badge-h1accepted { color: var(--green); border-color: rgba(56, 193, 114, 0.24); background: rgba(56, 193, 114, 0.08); }
+  .badge-h0accepted { color: var(--red); border-color: rgba(255, 107, 107, 0.24); background: rgba(255, 107, 107, 0.08); }
+  .badge-inconclusive { color: var(--muted); border-color: rgba(147, 161, 181, 0.22); background: rgba(147, 161, 181, 0.08); }
 
-  /* ── Bisect ──────────────────────────────────────────────── */
-  .bisect-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
   }
-  .bisect-card h3 { font-size: 14px; margin-bottom: 12px; }
+
+  button {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel-3);
+    color: var(--text);
+    border-radius: var(--radius-sm);
+    padding: 9px 12px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  button:hover {
+    border-color: var(--line-2);
+    background: #131b25;
+  }
+
+  button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+  }
+
+  .button-primary {
+    border-color: rgba(78, 161, 255, 0.28);
+    background: rgba(78, 161, 255, 0.12);
+    color: var(--accent-2);
+  }
+
+  .button-danger {
+    border-color: rgba(255, 107, 107, 0.28);
+    background: rgba(255, 107, 107, 0.1);
+    color: var(--red);
+  }
+
+  .button-inline {
+    padding: 6px 9px;
+    font-size: 11px;
+  }
+
+  .admin-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .form-card {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+  }
+
+  .form-title {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .form-grid {
+    display: grid;
+    gap: 10px;
+  }
+
+  .form-grid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  label {
+    display: grid;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  input,
+  textarea,
+  select {
+    width: 100%;
+    background: var(--panel-3);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 10px 11px;
+    outline: none;
+  }
+
+  input:focus,
+  textarea:focus,
+  select:focus {
+    border-color: rgba(78, 161, 255, 0.35);
+  }
+
+  textarea {
+    min-height: 92px;
+    resize: vertical;
+  }
+
+  .help {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
   .bisect-track {
-    display: flex; align-items: center; gap: 2px; margin: 16px 0;
-    padding: 12px; background: var(--bg); border-radius: 6px; overflow-x: auto;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    overflow-x: auto;
+    margin: 10px 0 0;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
   }
+
   .bisect-dot {
-    width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
-    border: 2px solid var(--border);
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+    border: 2px solid var(--line-2);
+    background: transparent;
   }
+
   .bisect-dot.good { background: var(--green); border-color: var(--green); }
   .bisect-dot.bad { background: var(--red); border-color: var(--red); }
   .bisect-dot.uncertain { background: var(--yellow); border-color: var(--yellow); }
-  .bisect-dot.pending { background: transparent; }
-  .bisect-dot.culprit { background: var(--red); border-color: var(--yellow); box-shadow: 0 0 8px var(--red); }
-  .bisect-connector { width: 8px; height: 2px; background: var(--border); flex-shrink: 0; }
-  .bisect-meta { color: var(--text-dim); font-size: 12px; }
-  .bisect-meta span { margin-right: 16px; }
-
-  /* ── Empty state ─────────────────────────────────────────── */
-  .empty-state {
-    text-align: center; padding: 60px 20px; color: var(--text-dim);
+  .bisect-dot.culprit { background: var(--accent); border-color: var(--accent); }
+  .bisect-connector {
+    width: 8px;
+    height: 2px;
+    background: var(--line-2);
+    flex: 0 0 auto;
   }
-  .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.5; }
-  .empty-state p { font-size: 13px; }
 
-  /* ── Responsive ──────────────────────────────────────────── */
-  @media (max-width: 768px) {
-    .header { padding: 12px 16px; }
-    .tabs { padding: 0 16px; overflow-x: auto; }
-    .panel { padding: 16px; }
-    .grid { grid-template-columns: repeat(2, 1fr); }
+  .empty {
+    padding: 18px;
+    border: 1px dashed var(--line-2);
+    border-radius: var(--radius-sm);
+    color: var(--muted);
+    text-align: center;
+  }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 1200px) {
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .split,
+    .admin-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 760px) {
+    .app { padding: 12px; }
+    .topbar,
+    .panel-head,
+    .engine-row-head,
+    .bisect-head { flex-direction: column; align-items: stretch; }
+    .statusbar { justify-content: flex-start; }
+    .stats,
+    .form-grid.two { grid-template-columns: 1fr; }
   }
 </style>
 </head>
 <body>
-
-<div class="header">
-  <h1>&#9876; Crucible <span>Chess Engine CI</span></h1>
-  <div class="header-right">
-    <span class="status-label" id="uptime"></span>
-    <span class="status-dot ok" id="status-dot"></span>
-    <span class="status-label" id="status-label">Connected</span>
-  </div>
-</div>
-
-<div class="tabs">
-  <div class="tab active" data-tab="dashboard">Dashboard</div>
-  <div class="tab" data-tab="timeline">Elo Timeline</div>
-  <div class="tab" data-tab="jobs">Jobs</div>
-  <div class="tab" data-tab="bisect">Bisect</div>
-</div>
-
-<!-- ── Dashboard ──────────────────────────────────────────── -->
-<div class="panel active" id="panel-dashboard">
-  <div class="grid">
-    <div class="stat-card">
-      <div class="label">Engines Tracked</div>
-      <div class="value" id="stat-engines" style="color:var(--accent)">-</div>
+<div class="app">
+  <div class="topbar">
+    <div class="title-wrap">
+      <h1 class="title">Crucible</h1>
+      <div class="subtitle">engine ci</div>
     </div>
-    <div class="stat-card">
-      <div class="label">Active Tests</div>
-      <div class="value" id="stat-active" style="color:var(--yellow)">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Queued</div>
-      <div class="value" id="stat-queued" style="color:var(--text-dim)">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Games Played</div>
-      <div class="value" id="stat-games" style="color:var(--green)">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Games / min</div>
-      <div class="value" id="stat-rate" style="color:var(--text-dim)">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Completed Jobs</div>
-      <div class="value" id="stat-completed" style="color:var(--text-dim)">-</div>
+    <div class="statusbar">
+      <div class="status-pill connected" id="status-pill">Connected</div>
+      <div class="chip">uptime <span class="mono" id="uptime">-</span></div>
+      <div class="chip">active <span class="mono" id="hero-active">-</span></div>
+      <div class="chip">queued <span class="mono" id="hero-queued">-</span></div>
+      <div class="chip">gpm <span class="mono" id="hero-rate">-</span></div>
     </div>
   </div>
 
-  <div class="chart-wrapper">
-    <div class="chart-header">
-      <h2>Elo Timeline</h2>
-      <div class="chart-controls">
-        <select id="dash-engine-select"><option value="">Select engine...</option></select>
+  <div class="toast" id="toast"></div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="timeline">Timeline</button>
+    <button class="tab" data-tab="jobs">Jobs</button>
+    <button class="tab" data-tab="bisect">Bisect</button>
+    <button class="tab" data-tab="admin">Admin</button>
+  </div>
+
+  <section class="panel active" id="panel-overview">
+    <div class="stack">
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label">Engines</div>
+          <div class="stat-value mono" id="stat-engines">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Active</div>
+          <div class="stat-value mono" id="stat-active">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Queued</div>
+          <div class="stat-value mono" id="stat-queued">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Completed</div>
+          <div class="stat-value mono" id="stat-completed">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Games</div>
+          <div class="stat-value mono" id="stat-games">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Games / min</div>
+          <div class="stat-value mono" id="stat-rate">-</div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Elo</h2>
+            </div>
+            <div class="controls">
+              <select id="overview-engine-select"></select>
+              <button type="button" id="refresh-overview">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="chart-shell">
+              <canvas class="chart-canvas" id="overview-chart"></canvas>
+              <div class="chart-tooltip" id="overview-tooltip"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">Engines</h2>
+          </div>
+          <div class="card-body">
+            <div class="engine-list" id="overview-engine-grid"></div>
+            <div class="empty hidden" id="overview-engine-empty">No engines tracked.</div>
+          </div>
+        </div>
       </div>
     </div>
-    <canvas id="dash-elo-chart"></canvas>
-    <div class="chart-tooltip" id="dash-tooltip"></div>
-  </div>
-</div>
+  </section>
 
-<!-- ── Elo Timeline (dedicated) ───────────────────────────── -->
-<div class="panel" id="panel-timeline">
-  <div class="chart-wrapper">
-    <div class="chart-header">
-      <h2>Elo Timeline</h2>
-      <div class="chart-controls">
-        <select id="tl-engine-select"><option value="">Select engine...</option></select>
+  <section class="panel" id="panel-timeline">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Timeline</h2>
+      </div>
+      <div class="controls">
+        <select id="timeline-engine-select"></select>
+        <button type="button" id="refresh-timeline">Refresh</button>
       </div>
     </div>
-    <canvas id="tl-elo-chart"></canvas>
-    <div class="chart-tooltip" id="tl-tooltip"></div>
-  </div>
-</div>
+    <div class="card">
+      <div class="card-body">
+        <div class="chart-shell">
+          <canvas class="chart-canvas" id="timeline-chart"></canvas>
+          <div class="chart-tooltip" id="timeline-tooltip"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-<!-- ── Jobs ────────────────────────────────────────────────── -->
-<div class="panel" id="panel-jobs">
-  <div class="table-wrapper">
-    <table>
-      <thead>
-        <tr>
-          <th>Status</th>
-          <th>Engine</th>
-          <th>Dev</th>
-          <th>Base</th>
-          <th>Type</th>
-          <th>W / D / L</th>
-          <th>Elo</th>
-          <th>SPRT</th>
-          <th>Created</th>
-        </tr>
-      </thead>
-      <tbody id="jobs-body"></tbody>
-    </table>
-  </div>
-  <div class="empty-state" id="jobs-empty" style="display:none">
-    <div class="icon">&#128203;</div>
-    <p>No jobs yet. Jobs appear here once engines are configured and commits are detected.</p>
-  </div>
-</div>
+  <section class="panel" id="panel-jobs">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Jobs</h2>
+        <p class="panel-subtitle">running and queued jobs can be cancelled here</p>
+      </div>
+      <button type="button" id="refresh-jobs">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Engine</th>
+            <th>Dev</th>
+            <th>Base</th>
+            <th>Type</th>
+            <th>W / D / L</th>
+            <th>Elo</th>
+            <th>SPRT</th>
+            <th>Created</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="jobs-body"></tbody>
+      </table>
+    </div>
+    <div class="empty hidden" id="jobs-empty">No jobs.</div>
+  </section>
 
-<!-- ── Bisect ─────────────────────────────────────────────── -->
-<div class="panel" id="panel-bisect">
-  <div id="bisect-list"></div>
-  <div class="empty-state" id="bisect-empty">
-    <div class="icon">&#128270;</div>
-    <p>No active bisect sessions. Start one from the CLI to hunt down a regression.</p>
-  </div>
+  <section class="panel" id="panel-bisect">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Bisect</h2>
+      </div>
+      <button type="button" id="refresh-bisect">Refresh</button>
+    </div>
+    <div class="bisect-list" id="bisect-list"></div>
+    <div class="empty" id="bisect-empty">No active bisect sessions.</div>
+  </section>
+
+  <section class="panel" id="panel-admin">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Admin</h2>
+      </div>
+    </div>
+
+    <div class="admin-grid">
+      <form class="form-card" id="add-engine-form">
+        <h3 class="form-title">Add engine</h3>
+        <div class="form-grid two">
+          <label>
+            name
+            <input name="name" required>
+          </label>
+          <label>
+            branches
+            <input name="branches" placeholder="main, dev" required>
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            repo
+            <input name="repo" required>
+          </label>
+          <label>
+            build_cmd
+            <input name="build_cmd" required>
+          </label>
+          <div class="form-grid two">
+            <label>
+              binary_path
+              <input name="binary_path" required>
+            </label>
+            <label>
+              start_from
+              <input name="start_from" placeholder="optional">
+            </label>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button class="button-primary" type="submit">Save</button>
+        </div>
+      </form>
+
+      <form class="form-card" id="manual-test-form">
+        <h3 class="form-title">Manual test</h3>
+        <div class="form-grid">
+          <label>
+            engine
+            <select name="engine_id" id="manual-test-engine" required></select>
+          </label>
+          <div class="form-grid two">
+            <label>
+              dev
+              <input name="dev" required>
+            </label>
+            <label>
+              base
+              <input name="base" required>
+            </label>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button class="button-primary" type="submit">Queue</button>
+        </div>
+      </form>
+
+      <form class="form-card" id="bisect-form">
+        <h3 class="form-title">Start bisect</h3>
+        <div class="form-grid">
+          <label>
+            engine
+            <select name="engine_id" id="bisect-engine" required></select>
+          </label>
+          <div class="form-grid two">
+            <label>
+              good
+              <input name="good" required>
+            </label>
+            <label>
+              bad
+              <input name="bad" required>
+            </label>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button class="button-primary" type="submit">Start</button>
+        </div>
+      </form>
+
+      <div class="form-card">
+        <h3 class="form-title">Tracked engines</h3>
+        <div class="engine-admin-list" id="admin-engine-grid"></div>
+        <div class="empty hidden" id="admin-engine-empty">No tracked engines.</div>
+      </div>
+    </div>
+  </section>
 </div>
 
 <script>
-  // ── Tab switching ──────────────────────────────────────────
-  const tabs = document.querySelectorAll('.tab');
-  const panels = document.querySelectorAll('.panel');
+  const colors = {
+    text: '#e6edf6',
+    muted: '#93a1b5',
+    line: '#283342',
+    accent: '#4ea1ff',
+    accentSoft: 'rgba(78, 161, 255, 0.14)',
+    green: '#38c172',
+    red: '#ff6b6b',
+    panel: '#111821'
+  };
 
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      const target = tab.dataset.tab;
-      tabs.forEach(t => t.classList.remove('active'));
-      panels.forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById('panel-' + target).classList.add('active');
+  const state = {
+    engines: [],
+    chartCache: {},
+    activeTab: 'overview'
+  };
 
-      // Load data for the tab on first visit
-      if (target === 'jobs') loadJobs();
-      if (target === 'bisect') loadBisect();
-      if (target === 'timeline') loadTimeline('tl');
+  const tabs = [...document.querySelectorAll('.tab')];
+  const panels = [...document.querySelectorAll('.panel')];
+
+  tabs.forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
+  document.getElementById('refresh-overview').addEventListener('click', () => refreshAll(true));
+  document.getElementById('refresh-timeline').addEventListener('click', () => loadTimeline('timeline'));
+  document.getElementById('refresh-jobs').addEventListener('click', loadJobs);
+  document.getElementById('refresh-bisect').addEventListener('click', loadBisect);
+  document.getElementById('overview-engine-select').addEventListener('change', () => loadTimeline('overview'));
+  document.getElementById('timeline-engine-select').addEventListener('change', () => loadTimeline('timeline'));
+  document.getElementById('add-engine-form').addEventListener('submit', handleAddEngine);
+  document.getElementById('manual-test-form').addEventListener('submit', handleManualTest);
+  document.getElementById('bisect-form').addEventListener('submit', handleBisect);
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      },
+      ...options
     });
-  });
-
-  // ── State ──────────────────────────────────────────────────
-  let engines = [];
-  let chartDataCache = {};
-
-  // ── API helpers ────────────────────────────────────────────
-  async function api(path) {
-    const res = await fetch(path);
-    if (!res.ok) throw new Error(res.statusText);
-    return res.json();
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json')
+      ? await response.json()
+      : { error: await response.text() };
+    if (!response.ok) {
+      throw new Error(payload.error || response.statusText || 'Request failed');
+    }
+    return payload;
   }
 
-  // ── Status polling ─────────────────────────────────────────
+  function showToast(message, kind = 'success') {
+    const toast = document.getElementById('toast');
+    toast.className = `toast ${kind}`;
+    toast.textContent = message;
+    clearTimeout(showToast.timer);
+    showToast.timer = setTimeout(() => {
+      toast.className = 'toast';
+      toast.textContent = '';
+    }, 3500);
+  }
+
+  function switchTab(tabName) {
+    state.activeTab = tabName;
+    tabs.forEach(tab => tab.classList.toggle('active', tab.dataset.tab === tabName));
+    panels.forEach(panel => panel.classList.toggle('active', panel.id === `panel-${tabName}`));
+    if (tabName === 'jobs') loadJobs();
+    if (tabName === 'bisect') loadBisect();
+    if (tabName === 'timeline') loadTimeline('timeline');
+    if (tabName === 'admin') renderAdminEngineList();
+  }
+
+  async function refreshAll(clearCache = false) {
+    if (clearCache) state.chartCache = {};
+    await Promise.allSettled([updateStatus(), loadEngines()]);
+    if (state.activeTab === 'jobs') loadJobs();
+    if (state.activeTab === 'bisect') loadBisect();
+    if (state.activeTab === 'timeline') loadTimeline('timeline');
+    loadTimeline('overview');
+  }
+
   async function updateStatus() {
     try {
       const data = await api('/api/status');
       document.getElementById('stat-engines').textContent = data.engines_tracked;
       document.getElementById('stat-active').textContent = data.active_jobs;
       document.getElementById('stat-queued').textContent = data.queued_jobs;
-      document.getElementById('stat-games').textContent = data.total_games_played.toLocaleString();
-      document.getElementById('stat-rate').textContent = data.games_per_minute.toFixed(1);
       document.getElementById('stat-completed').textContent = data.completed_jobs;
+      document.getElementById('stat-games').textContent = Number(data.total_games_played || 0).toLocaleString();
+      document.getElementById('stat-rate').textContent = Number(data.games_per_minute || 0).toFixed(1);
+      document.getElementById('hero-active').textContent = data.active_jobs;
+      document.getElementById('hero-queued').textContent = data.queued_jobs;
+      document.getElementById('hero-rate').textContent = Number(data.games_per_minute || 0).toFixed(1);
       document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
-      setConnected(true);
-    } catch(e) {
-      setConnected(false);
+      setConnectionState(true);
+    } catch (_) {
+      setConnectionState(false);
     }
   }
 
-  function setConnected(ok) {
-    const dot = document.getElementById('status-dot');
-    const label = document.getElementById('status-label');
-    dot.className = 'status-dot ' + (ok ? 'ok' : 'err');
-    label.textContent = ok ? 'Connected' : 'Disconnected';
+  function setConnectionState(isConnected) {
+    const pill = document.getElementById('status-pill');
+    pill.className = `status-pill ${isConnected ? 'connected' : 'disconnected'}`;
+    pill.textContent = isConnected ? 'Connected' : 'Disconnected';
   }
 
-  function formatUptime(s) {
-    if (!s) return '';
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
-  }
-
-  // ── Engine list ────────────────────────────────────────────
   async function loadEngines() {
     try {
-      engines = await api('/api/engines');
-      populateSelect('dash-engine-select', engines);
-      populateSelect('tl-engine-select', engines);
-      if (engines.length > 0) {
-        document.getElementById('dash-engine-select').value = engines[0].id;
-        document.getElementById('tl-engine-select').value = engines[0].id;
-        loadTimeline('dash');
-      }
-    } catch(e) { /* ignore */ }
+      state.engines = await api('/api/engines');
+      populateEngineSelects();
+      renderOverviewEngineGrid();
+      renderAdminEngineList();
+      loadTimeline('overview');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
   }
 
-  function populateSelect(id, engines) {
-    const sel = document.getElementById(id);
-    sel.innerHTML = '<option value="">Select engine...</option>';
-    engines.forEach(e => {
-      const opt = document.createElement('option');
-      opt.value = e.id;
-      opt.textContent = e.name;
-      sel.appendChild(opt);
+  function populateEngineSelects() {
+    const selects = [
+      document.getElementById('overview-engine-select'),
+      document.getElementById('timeline-engine-select'),
+      document.getElementById('manual-test-engine'),
+      document.getElementById('bisect-engine')
+    ];
+
+    selects.forEach(select => {
+      const previousValue = select.value;
+      select.innerHTML = '';
+      if (!state.engines.length) {
+        select.disabled = true;
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No engines';
+        select.appendChild(option);
+        return;
+      }
+
+      select.disabled = false;
+      state.engines.forEach(engine => {
+        const option = document.createElement('option');
+        option.value = engine.id;
+        option.textContent = engine.name;
+        select.appendChild(option);
+      });
+      const exists = state.engines.some(engine => engine.id === previousValue);
+      select.value = exists ? previousValue : state.engines[0].id;
     });
   }
 
-  // ── Elo chart ──────────────────────────────────────────────
-  document.getElementById('dash-engine-select').addEventListener('change', () => loadTimeline('dash'));
-  document.getElementById('tl-engine-select').addEventListener('change', () => loadTimeline('tl'));
-
-  async function loadTimeline(prefix) {
-    const sel = document.getElementById(prefix + '-engine-select');
-    const engineId = sel.value;
-    if (!engineId) return;
-
-    let dataPoints;
-    if (chartDataCache[engineId]) {
-      dataPoints = chartDataCache[engineId];
-    } else {
-      try {
-        dataPoints = await api('/api/timeline/' + encodeURIComponent(engineId));
-        chartDataCache[engineId] = dataPoints;
-      } catch(e) { dataPoints = []; }
-    }
-
-    const canvas = document.getElementById(prefix + '-elo-chart');
-    const tooltip = document.getElementById(prefix + '-tooltip');
-    drawEloChart(canvas, tooltip, dataPoints);
-  }
-
-  function drawEloChart(canvas, tooltipEl, dataPoints) {
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.offsetWidth;
-    const h = canvas.offsetHeight;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    ctx.scale(dpr, dpr);
-
-    const pad = { top: 24, right: 24, bottom: 44, left: 64 };
-    const cw = w - pad.left - pad.right;
-    const ch = h - pad.top - pad.bottom;
-
-    ctx.clearRect(0, 0, w, h);
-
-    if (!dataPoints || dataPoints.length === 0) {
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '13px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('No data yet \u2014 waiting for test results...', w / 2, h / 2);
-      // Clear any prior mouse handler
-      canvas.onmousemove = null;
-      canvas.onmouseleave = null;
+  function renderOverviewEngineGrid() {
+    const list = document.getElementById('overview-engine-grid');
+    const empty = document.getElementById('overview-engine-empty');
+    if (!state.engines.length) {
+      list.innerHTML = '';
+      empty.classList.remove('hidden');
       return;
     }
 
-    const elos = dataPoints.map(d => d.elo);
-    const errors = dataPoints.map(d => d.elo_error || 0);
-    const minElo = Math.min(...elos.map((e, i) => e - errors[i])) - 8;
-    const maxElo = Math.max(...elos.map((e, i) => e + errors[i])) + 8;
-    const eloRange = maxElo - minElo || 1;
+    empty.classList.add('hidden');
+    list.innerHTML = state.engines.map(engine => `
+      <div class="engine-row">
+        <div class="engine-row-head">
+          <div>
+            <h3 class="engine-name">${escapeHtml(engine.name)}</h3>
+            <div class="meta">${escapeHtml(engine.repo_url)}</div>
+          </div>
+        </div>
+        <div class="tag-row">
+          ${engine.branches.map(branch => `<span class="tag">${escapeHtml(branch)}</span>`).join('')}
+        </div>
+        <div class="meta" style="margin-top:8px;">
+          build <code>${escapeHtml(engine.build_cmd)}</code><br>
+          binary <code>${escapeHtml(engine.binary_path)}</code>
+          ${engine.start_from ? `<br>start_from <code>${escapeHtml(engine.start_from)}</code>` : ''}
+        </div>
+      </div>
+    `).join('');
+  }
 
-    function xFor(i) { return pad.left + (cw * i / Math.max(dataPoints.length - 1, 1)); }
-    function yFor(elo) { return pad.top + ch * (1 - (elo - minElo) / eloRange); }
-
-    // Grid lines
-    ctx.strokeStyle = '#21262d';
-    ctx.lineWidth = 1;
-    const gridLines = 6;
-    for (let i = 0; i <= gridLines; i++) {
-      const y = Math.round(pad.top + ch * i / gridLines) + 0.5;
-      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+  function renderAdminEngineList() {
+    const list = document.getElementById('admin-engine-grid');
+    const empty = document.getElementById('admin-engine-empty');
+    if (!state.engines.length) {
+      list.innerHTML = '';
+      empty.classList.remove('hidden');
+      return;
     }
 
-    // Zero line
+    empty.classList.add('hidden');
+    list.innerHTML = state.engines.map(engine => `
+      <div class="engine-row">
+        <div class="engine-row-head">
+          <div>
+            <h3 class="engine-name">${escapeHtml(engine.name)}</h3>
+            <div class="meta">${escapeHtml(engine.repo_url)}</div>
+          </div>
+          <button class="button-danger button-inline" type="button" data-delete-engine="${engine.id}">Delete</button>
+        </div>
+        <div class="tag-row">
+          ${engine.branches.map(branch => `<span class="tag">${escapeHtml(branch)}</span>`).join('')}
+        </div>
+      </div>
+    `).join('');
+
+    list.querySelectorAll('[data-delete-engine]').forEach(button => {
+      button.addEventListener('click', () => deleteEngine(button.dataset.deleteEngine, button));
+    });
+  }
+
+  async function loadTimeline(view) {
+    const select = document.getElementById(`${view}-engine-select`);
+    const canvas = document.getElementById(`${view}-chart`);
+    const tooltip = document.getElementById(`${view}-tooltip`);
+    if (!select || !canvas || !tooltip || !select.value) {
+      drawEloChart(canvas, tooltip, []);
+      return;
+    }
+
+    const engineId = select.value;
+    let points = state.chartCache[engineId];
+    if (!points) {
+      try {
+        points = await api(`/api/timeline/${encodeURIComponent(engineId)}`);
+        state.chartCache[engineId] = points;
+      } catch (error) {
+        showToast(error.message, 'error');
+        points = [];
+      }
+    }
+    drawEloChart(canvas, tooltip, points);
+  }
+
+  function drawEloChart(canvas, tooltipEl, points) {
+    if (!canvas || !tooltipEl) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth || 600;
+    const height = canvas.clientHeight || 380;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const pad = { top: 16, right: 18, bottom: 44, left: 56 };
+    const innerWidth = width - pad.left - pad.right;
+    const innerHeight = height - pad.top - pad.bottom;
+
+    if (!points || !points.length) {
+      ctx.fillStyle = colors.muted;
+      ctx.font = '13px "IBM Plex Sans", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('No completed Elo data.', width / 2, height / 2);
+      canvas.onmousemove = null;
+      canvas.onmouseleave = null;
+      tooltipEl.style.display = 'none';
+      return;
+    }
+
+    const elos = points.map(point => point.elo);
+    const errors = points.map(point => point.elo_error || 0);
+    const minElo = Math.min(...elos.map((elo, i) => elo - errors[i])) - 8;
+    const maxElo = Math.max(...elos.map((elo, i) => elo + errors[i])) + 8;
+    const range = maxElo - minElo || 1;
+    const xFor = index => pad.left + innerWidth * index / Math.max(points.length - 1, 1);
+    const yFor = elo => pad.top + innerHeight * (1 - (elo - minElo) / range);
+
+    ctx.strokeStyle = colors.line;
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+      const y = Math.round(pad.top + innerHeight * i / 5) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(width - pad.right, y);
+      ctx.stroke();
+    }
+
     if (minElo < 0 && maxElo > 0) {
-      const zy = Math.round(yFor(0)) + 0.5;
-      ctx.strokeStyle = '#58a6ff33';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath(); ctx.moveTo(pad.left, zy); ctx.lineTo(w - pad.right, zy); ctx.stroke();
+      const zeroY = Math.round(yFor(0)) + 0.5;
+      ctx.strokeStyle = 'rgba(78, 161, 255, 0.32)';
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, zeroY);
+      ctx.lineTo(width - pad.right, zeroY);
+      ctx.stroke();
       ctx.setLineDash([]);
     }
 
-    // Error band (confidence interval)
-    ctx.fillStyle = '#58a6ff0d';
+    ctx.fillStyle = colors.accentSoft;
     ctx.beginPath();
-    dataPoints.forEach((d, i) => {
-      const x = xFor(i);
-      const y = yFor(d.elo + (d.elo_error || 0));
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    points.forEach((point, index) => {
+      const x = xFor(index);
+      const y = yFor(point.elo + (point.elo_error || 0));
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     });
-    for (let i = dataPoints.length - 1; i >= 0; i--) {
-      ctx.lineTo(xFor(i), yFor(dataPoints[i].elo - (dataPoints[i].elo_error || 0)));
+    for (let index = points.length - 1; index >= 0; index--) {
+      ctx.lineTo(xFor(index), yFor(points[index].elo - (points[index].elo_error || 0)));
     }
     ctx.closePath();
     ctx.fill();
 
-    // Main line
-    ctx.strokeStyle = '#58a6ff';
+    ctx.strokeStyle = colors.accent;
     ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
     ctx.beginPath();
-    dataPoints.forEach((d, i) => {
-      const x = xFor(i), y = yFor(d.elo);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    points.forEach((point, index) => {
+      const x = xFor(index);
+      const y = yFor(point.elo);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     });
     ctx.stroke();
 
-    // Data points
-    dataPoints.forEach((d, i) => {
-      const x = xFor(i), y = yFor(d.elo);
-      const r = d.is_release ? 5 : (d.tag ? 4 : 3);
-      ctx.fillStyle = d.is_release ? '#d29922' : (d.tag ? '#3fb950' : '#58a6ff');
+    points.forEach((point, index) => {
+      const x = xFor(index);
+      const y = yFor(point.elo);
+      const radius = point.is_release ? 5 : (point.tag ? 4 : 3);
+      ctx.fillStyle = point.is_release ? colors.green : colors.accent;
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fill();
     });
 
-    // Y-axis labels
-    ctx.fillStyle = '#8b949e';
-    ctx.font = '11px monospace';
+    ctx.fillStyle = colors.muted;
+    ctx.font = '11px "IBM Plex Mono", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    for (let i = 0; i <= gridLines; i++) {
-      const elo = maxElo - (eloRange * i / gridLines);
-      const y = pad.top + ch * i / gridLines;
-      ctx.fillText(elo.toFixed(0), pad.left - 10, y);
+    for (let i = 0; i <= 5; i++) {
+      const elo = maxElo - range * i / 5;
+      const y = pad.top + innerHeight * i / 5;
+      ctx.fillText(elo.toFixed(0), pad.left - 8, y);
     }
 
-    // X-axis labels (show a few commit hashes)
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const step = Math.max(1, Math.floor(dataPoints.length / 8));
-    for (let i = 0; i < dataPoints.length; i += step) {
-      ctx.fillText(dataPoints[i].commit_hash.substring(0, 7), xFor(i), h - pad.bottom + 8);
+    const step = Math.max(1, Math.floor(points.length / 8));
+    for (let i = 0; i < points.length; i += step) {
+      ctx.fillText(points[i].commit_hash.slice(0, 7), xFor(i), height - pad.bottom + 8);
     }
-    // Always show last
-    if (dataPoints.length > 1) {
-      const last = dataPoints.length - 1;
-      ctx.fillText(dataPoints[last].commit_hash.substring(0, 7), xFor(last), h - pad.bottom + 8);
+    if (points.length > 1) {
+      const last = points.length - 1;
+      ctx.fillText(points[last].commit_hash.slice(0, 7), xFor(last), height - pad.bottom + 8);
     }
 
-    // ── Hover interaction ──────────────────────────────────
-    const pointPositions = dataPoints.map((d, i) => ({ x: xFor(i), y: yFor(d.elo), i }));
+    const hitPoints = points.map((point, index) => ({
+      x: xFor(index),
+      y: yFor(point.elo),
+      point
+    }));
 
-    canvas.onmousemove = function(e) {
+    canvas.onmousemove = event => {
       const rect = canvas.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-
-      let closest = null, bestDist = 30;
-      pointPositions.forEach(p => {
-        const dist = Math.hypot(mx - p.x, my - p.y);
-        if (dist < bestDist) { bestDist = dist; closest = p; }
+      const mx = event.clientX - rect.left;
+      const my = event.clientY - rect.top;
+      let best = null;
+      let bestDistance = 26;
+      hitPoints.forEach(candidate => {
+        const distance = Math.hypot(mx - candidate.x, my - candidate.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = candidate;
+        }
       });
 
-      if (closest) {
-        const d = dataPoints[closest.i];
-        const sign = d.elo >= 0 ? '+' : '';
-        const cls = d.elo >= 0 ? 'pos' : 'neg';
-        tooltipEl.innerHTML =
-          '<span class="tt-hash">' + d.commit_hash.substring(0, 8) + '</span>' +
-          (d.tag ? ' <span style="color:var(--green)">' + d.tag + '</span>' : '') +
-          '<br><span class="tt-elo ' + cls + '">' + sign + d.elo.toFixed(1) + ' \u00b1 ' + d.elo_error.toFixed(1) + ' Elo</span>' +
-          '<br><span class="tt-msg">' + escHtml(d.commit_message) + '</span>' +
-          '<br><span class="tt-games">' + d.games_played + ' games</span>';
-
-        const tw = tooltipEl.offsetWidth || 200;
-        let tx = closest.x + 12;
-        if (tx + tw > w - 10) tx = closest.x - tw - 12;
-        let ty = closest.y - 40;
-        if (ty < 4) ty = closest.y + 12;
-
-        tooltipEl.style.display = 'block';
-        tooltipEl.style.left = tx + 'px';
-        tooltipEl.style.top = ty + 'px';
-      } else {
+      if (!best) {
         tooltipEl.style.display = 'none';
+        return;
       }
+
+      const point = best.point;
+      tooltipEl.innerHTML = `
+        <strong>${escapeHtml(point.commit_hash.slice(0, 8))}</strong>${point.tag ? ` <span>${escapeHtml(point.tag)}</span>` : ''}
+        <br>${point.elo >= 0 ? '+' : ''}${point.elo.toFixed(1)} ± ${Number(point.elo_error || 0).toFixed(1)} Elo
+        <br>${escapeHtml(point.commit_message)}
+        <br>${point.games_played} games • ${escapeHtml(point.branch)}
+      `;
+      tooltipEl.style.display = 'block';
+      const left = Math.min(width - 310, best.x + 12);
+      const top = Math.max(8, best.y - 46);
+      tooltipEl.style.left = `${left}px`;
+      tooltipEl.style.top = `${top}px`;
     };
 
-    canvas.onmouseleave = function() {
+    canvas.onmouseleave = () => {
       tooltipEl.style.display = 'none';
     };
   }
 
-  function escHtml(s) {
-    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  // ── Jobs table ─────────────────────────────────────────────
   async function loadJobs() {
     try {
-      const data = await api('/api/jobs');
-      const jobs = data.jobs || [];
-      const tbody = document.getElementById('jobs-body');
+      const payload = await api('/api/jobs');
+      const jobs = payload.jobs || [];
+      const body = document.getElementById('jobs-body');
       const empty = document.getElementById('jobs-empty');
-
-      if (jobs.length === 0) {
-        tbody.innerHTML = '';
-        empty.style.display = 'block';
+      if (!jobs.length) {
+        body.innerHTML = '';
+        empty.classList.remove('hidden');
         return;
       }
-      empty.style.display = 'none';
 
-      tbody.innerHTML = jobs.map(j => {
-        const statusCls = 'badge-' + j.status.toLowerCase();
-        const hasResult = j.wins != null;
-        const wdl = hasResult ? j.wins + ' / ' + j.draws + ' / ' + j.losses : '-';
-        const elo = j.elo_diff != null
-          ? '<span class="' + (j.elo_diff >= 0 ? 'elo-positive' : 'elo-negative') + '">'
-            + (j.elo_diff >= 0 ? '+' : '') + j.elo_diff.toFixed(1)
-            + (j.elo_error != null ? ' \u00b1 ' + j.elo_error.toFixed(1) : '')
-            + '</span>'
+      empty.classList.add('hidden');
+      body.innerHTML = jobs.map(job => {
+        const elo = job.elo_diff == null
+          ? '-'
+          : `<span class="${job.elo_diff >= 0 ? 'positive' : 'negative'} mono">${job.elo_diff >= 0 ? '+' : ''}${job.elo_diff.toFixed(1)}${job.elo_error != null ? ` ± ${job.elo_error.toFixed(1)}` : ''}</span>`;
+        const sprt = job.sprt_result
+          ? `<span class="badge badge-${job.sprt_result.toLowerCase()}">${job.sprt_result}</span>`
           : '-';
-        const sprt = j.sprt_result
-          ? '<span class="badge badge-' + j.sprt_result.toLowerCase() + '">' + j.sprt_result + '</span>'
-          : '-';
-        const created = timeAgo(j.created_at);
-
-        return '<tr>'
-          + '<td><span class="badge ' + statusCls + '">' + j.status + '</span></td>'
-          + '<td>' + escHtml(j.engine_name) + '</td>'
-          + '<td class="mono">' + j.dev_commit_hash.substring(0, 7) + '</td>'
-          + '<td class="mono">' + j.base_commit_hash.substring(0, 7) + '</td>'
-          + '<td>' + j.job_type + '</td>'
-          + '<td class="mono">' + wdl + '</td>'
-          + '<td class="mono">' + elo + '</td>'
-          + '<td>' + sprt + '</td>'
-          + '<td title="' + j.created_at + '">' + created + '</td>'
-          + '</tr>';
+        const action = (job.status === 'Queued' || job.status === 'Running')
+          ? `<button class="button-danger button-inline" type="button" data-cancel-job="${job.id}">Cancel</button>`
+          : '—';
+        return `
+          <tr>
+            <td><span class="badge badge-${job.status.toLowerCase()}">${job.status}</span></td>
+            <td>${escapeHtml(job.engine_name)}</td>
+            <td class="mono">${escapeHtml(job.dev_commit_hash.slice(0, 8))}</td>
+            <td class="mono">${escapeHtml(job.base_commit_hash.slice(0, 8))}</td>
+            <td>${escapeHtml(job.job_type)}</td>
+            <td class="mono">${job.wins} / ${job.draws} / ${job.losses}</td>
+            <td>${elo}</td>
+            <td>${sprt}</td>
+            <td title="${escapeHtml(job.created_at)}">${timeAgo(job.created_at)}</td>
+            <td>${action}</td>
+          </tr>
+        `;
       }).join('');
-    } catch(e) {
-      document.getElementById('jobs-empty').style.display = 'block';
+
+      body.querySelectorAll('[data-cancel-job]').forEach(button => {
+        button.addEventListener('click', () => cancelJob(button.dataset.cancelJob, button));
+      });
+    } catch (error) {
+      showToast(error.message, 'error');
     }
   }
 
-  function timeAgo(iso) {
-    if (!iso) return '-';
-    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (diff < 60) return Math.floor(diff) + 's ago';
-    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-    return Math.floor(diff / 86400) + 'd ago';
-  }
-
-  // ── Bisect view ────────────────────────────────────────────
   async function loadBisect() {
     try {
       const sessions = await api('/api/bisect');
-      const container = document.getElementById('bisect-list');
+      const list = document.getElementById('bisect-list');
       const empty = document.getElementById('bisect-empty');
-
-      if (!sessions || sessions.length === 0) {
-        container.innerHTML = '';
-        empty.style.display = 'block';
+      if (!sessions.length) {
+        list.innerHTML = '';
+        empty.classList.remove('hidden');
         return;
       }
-      empty.style.display = 'none';
 
-      container.innerHTML = sessions.map(s => {
-        // Build the commit track visualization
-        const range = s.commit_range || [];
+      empty.classList.add('hidden');
+      list.innerHTML = sessions.map(session => {
         const probeMap = {};
-        (s.probe_history || []).forEach(p => { probeMap[p.index] = p.verdict; });
+        (session.probe_history || []).forEach(probe => { probeMap[probe.index] = probe.verdict; });
 
-        let trackHtml = '';
-        range.forEach((hash, i) => {
-          if (i > 0) trackHtml += '<div class="bisect-connector"></div>';
+        const track = (session.commit_range || []).map((hash, index) => {
           let cls = 'pending';
-          if (probeMap[i] === 'Good') cls = 'good';
-          else if (probeMap[i] === 'Bad') cls = 'bad';
-          else if (probeMap[i] === 'Uncertain') cls = 'uncertain';
-          if (s.culprit_revision_id && hash === s.culprit_revision_id) cls = 'culprit';
-          trackHtml += '<div class="bisect-dot ' + cls + '" title="' + hash.substring(0, 8) + ' — ' + (probeMap[i] || 'untested') + '"></div>';
-        });
+          if (probeMap[index] === 'Good') cls = 'good';
+          if (probeMap[index] === 'Bad') cls = 'bad';
+          if (probeMap[index] === 'Uncertain') cls = 'uncertain';
+          if (session.culprit_revision_id && hash === session.culprit_revision_id) cls = 'culprit';
+          const dot = `<div class="bisect-dot ${cls}" title="${escapeHtml(hash.slice(0, 8))} — ${escapeHtml(probeMap[index] || 'untested')}"></div>`;
+          return index === 0 ? dot : `<div class="bisect-connector"></div>${dot}`;
+        }).join('');
 
-        const statusBadge = s.status === 'Found'
-          ? '<span class="badge badge-h1">Found</span>'
-          : s.status === 'Failed'
-            ? '<span class="badge badge-failed">Failed</span>'
-            : '<span class="badge badge-running">Running</span>';
-
-        return '<div class="bisect-card">'
-          + '<h3>' + statusBadge + ' Bisect on ' + escHtml(s.engine_id) + '</h3>'
-          + '<div class="bisect-meta">'
-          + '<span>Phase: ' + s.phase + '</span>'
-          + '<span>Range: ' + range.length + ' commits</span>'
-          + '<span>Probes: ' + (s.probe_history || []).length + '</span>'
-          + (s.culprit_revision_id ? '<span>Culprit: <span class="tt-hash">' + s.culprit_revision_id.substring(0, 8) + '</span></span>' : '')
-          + '</div>'
-          + '<div class="bisect-track">' + trackHtml + '</div>'
-          + '</div>';
+        return `
+          <div class="bisect-card">
+            <div class="bisect-head">
+              <div>
+                <div class="engine-name">${escapeHtml(engineName(session.engine_id))}</div>
+                <div class="meta">
+                  ${escapeHtml(session.phase)} • ${(session.commit_range || []).length} commits • ${(session.probe_history || []).length} probes
+                  ${session.culprit_revision_id ? ` • culprit ${escapeHtml(String(session.culprit_revision_id).slice(0, 8))}` : ''}
+                </div>
+              </div>
+              <button class="button-danger button-inline" type="button" data-cancel-bisect="${session.id}">Stop</button>
+            </div>
+            <div class="bisect-track">${track}</div>
+          </div>
+        `;
       }).join('');
-    } catch(e) {
-      document.getElementById('bisect-empty').style.display = 'block';
+
+      list.querySelectorAll('[data-cancel-bisect]').forEach(button => {
+        button.addEventListener('click', () => cancelBisect(button.dataset.cancelBisect, button));
+      });
+    } catch (error) {
+      showToast(error.message, 'error');
     }
   }
 
-  // ── Init ───────────────────────────────────────────────────
-  updateStatus();
-  loadEngines();
-  setInterval(updateStatus, 3000);
-  setInterval(() => { chartDataCache = {}; }, 30000); // refresh chart cache every 30s
+  async function handleAddEngine(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    setBusy(button, true);
+    try {
+      const data = new FormData(form);
+      const payload = {
+        name: String(data.get('name') || '').trim(),
+        repo: String(data.get('repo') || '').trim(),
+        branches: String(data.get('branches') || '').split(',').map(v => v.trim()).filter(Boolean),
+        build_cmd: String(data.get('build_cmd') || '').trim(),
+        binary_path: String(data.get('binary_path') || '').trim(),
+        start_from: String(data.get('start_from') || '').trim() || null
+      };
+      const result = await api('/api/admin/engines', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      showToast(`saved ${result.engine.name}`);
+      form.reset();
+      await refreshAfterMutation();
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
 
-  // Redraw charts on resize
+  async function handleManualTest(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    setBusy(button, true);
+    try {
+      const data = new FormData(form);
+      const payload = {
+        engine_id: String(data.get('engine_id') || ''),
+        dev: String(data.get('dev') || '').trim(),
+        base: String(data.get('base') || '').trim()
+      };
+      const result = await api('/api/admin/tests', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      showToast(`queued ${result.dev_commit} vs ${result.base_commit}`);
+      form.reset();
+      populateEngineSelects();
+      await refreshAfterMutation();
+      switchTab('jobs');
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function handleBisect(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    setBusy(button, true);
+    try {
+      const data = new FormData(form);
+      const payload = {
+        engine_id: String(data.get('engine_id') || ''),
+        good: String(data.get('good') || '').trim(),
+        bad: String(data.get('bad') || '').trim()
+      };
+      const result = await api('/api/admin/bisect', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      showToast(`started bisect ${result.first_probe || ''}`.trim());
+      form.reset();
+      populateEngineSelects();
+      await refreshAfterMutation();
+      switchTab('bisect');
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function deleteEngine(engineId, button) {
+    if (!confirm('Delete this engine and all stored history?')) return;
+    setBusy(button, true);
+    try {
+      await api(`/api/admin/engines/${encodeURIComponent(engineId)}`, { method: 'DELETE' });
+      showToast('engine deleted', 'info');
+      await refreshAfterMutation();
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function cancelJob(jobId, button) {
+    setBusy(button, true);
+    try {
+      await api(`/api/admin/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+      showToast('job cancelled', 'info');
+      await refreshAfterMutation();
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function cancelBisect(sessionId, button) {
+    setBusy(button, true);
+    try {
+      await api(`/api/admin/bisect/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST' });
+      showToast('bisect stopped', 'info');
+      await refreshAfterMutation();
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function refreshAfterMutation() {
+    state.chartCache = {};
+    await Promise.allSettled([updateStatus(), loadEngines(), loadJobs(), loadBisect()]);
+    loadTimeline('overview');
+    if (state.activeTab === 'timeline') loadTimeline('timeline');
+  }
+
+  function setBusy(button, busy) {
+    if (!button) return;
+    if (!button.dataset.label) button.dataset.label = button.textContent;
+    button.disabled = busy;
+    button.textContent = busy ? 'Working…' : button.dataset.label;
+  }
+
+  function formatUptime(seconds) {
+    const total = Number(seconds || 0);
+    if (!total) return '-';
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  }
+
+  function timeAgo(value) {
+    const then = new Date(value).getTime();
+    if (!then) return '-';
+    const diff = Math.max(0, Date.now() - then) / 1000;
+    if (diff < 60) return `${Math.floor(diff)}s`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    return `${Math.floor(diff / 86400)}d`;
+  }
+
+  function engineName(id) {
+    return state.engines.find(engine => engine.id === id)?.name || id;
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   let resizeTimer;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      const activePanel = document.querySelector('.panel.active');
-      if (activePanel.id === 'panel-dashboard') loadTimeline('dash');
-      if (activePanel.id === 'panel-timeline') loadTimeline('tl');
-    }, 200);
+      loadTimeline('overview');
+      if (state.activeTab === 'timeline') loadTimeline('timeline');
+    }, 150);
   });
+
+  updateStatus();
+  loadEngines();
+  setInterval(updateStatus, 3000);
+  setInterval(() => {
+    state.chartCache = {};
+    if (state.activeTab === 'overview') loadTimeline('overview');
+    if (state.activeTab === 'timeline') loadTimeline('timeline');
+  }, 30000);
 </script>
 </body>
 </html>

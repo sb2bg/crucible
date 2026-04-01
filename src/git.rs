@@ -82,6 +82,7 @@ impl GitManager {
 
         let mut revisions = Vec::new();
         let mut started = since.is_none();
+        let mut matched_start = since.is_none();
 
         for oid_result in revwalk {
             let oid = oid_result?;
@@ -93,6 +94,7 @@ impl GitManager {
                 if let Some(start) = since {
                     if hash.starts_with(start) || tags.get(&hash).map_or(false, |t| t == start) {
                         started = true;
+                        matched_start = true;
                     } else {
                         continue;
                     }
@@ -130,6 +132,16 @@ impl GitManager {
                 build_status: BuildStatus::Pending,
             };
             revisions.push(rev);
+        }
+
+        if let Some(start) = since {
+            if !matched_start {
+                anyhow::bail!(
+                    "start_from '{}' was not found on branch '{}'",
+                    start,
+                    branch_name
+                );
+            }
         }
 
         Ok(revisions)

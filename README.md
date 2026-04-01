@@ -21,6 +21,7 @@ Crucible is built for the solo dev. One command, your machine, your engine, your
 - **Multi-Engine, Multi-Branch** — Track multiple engines and branches simultaneously.
 - **Dual UI** — Terminal (TUI) for quick monitoring, web dashboard for deep dives and charts.
 - **PGN Archive** — Every game is saved and browsable.
+- **Self-Play Data Export** — Generate NNUE-style JSONL data from self-play and bucket it by reported search depth under engine/revision-specific directories.
 - **Zero Dependencies** — Single binary, SQLite storage, embedded web UI. No Docker, no Django, no external services.
 
 ## Quick Start
@@ -93,15 +94,19 @@ Edit `crucible.toml`:
 ```toml
 [server]
 web_port = 8877
-web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+web_host = "127.0.0.1"    # use "0.0.0.0" in Docker
 admin_token = "change-me" # optional; protects /api/admin/* with Bearer auth
 
 [testing]
-concurrency = 4           # Test jobs to run in parallel
+concurrency = 4            # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance
 poll_interval_seconds = 60 # how often the daemon checks for new commits/jobs
+
+[training]
+output_dir = ".crucible/training"
+selfplay_games = 100
 
 [testing.time_control]
 base_ms = 10000            # 10+0.1 STC
@@ -125,6 +130,32 @@ start_from = "v1.0.0"
 Entries under `[[engines]]` are imported automatically when `crucible run` starts.
 For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
 If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it.
+
+## Training Data
+
+You can generate self-play data for a specific engine revision:
+
+```bash
+crucible selfplay-data --engine Sykora --games 200
+```
+
+By default, Crucible uses the latest successfully built revision for that engine, reuses your configured time control, and writes JSONL under:
+
+```text
+.crucible/training/<engine>/<revision>/<run-timestamp>/
+```
+
+Each run is split into files like `depth-010.jsonl`, `depth-011.jsonl`, and so on, so you can decide later which depth bands are worth training on. Every row includes engine and revision metadata, the FEN, side to move, reported depth, score, chosen move, and final game result from that side's perspective.
+
+To pin a specific revision or change the destination:
+
+```bash
+crucible selfplay-data \
+  --engine Sykora \
+  --revision eb640fa6 \
+  --games 500 \
+  --output-dir /data/nnue
+```
 
 ## CI/CD
 
@@ -150,6 +181,7 @@ Published images go to `ghcr.io/<your-github-username>/crucible`.
 | `crucible status`                                         | Show current testing status       |
 | `crucible bisect --engine <n> --good <hash> --bad <hash>` | Start a regression hunt           |
 | `crucible test --engine <n> --dev <hash> --base <hash>`   | Manual one-off test               |
+| `crucible selfplay-data --engine <n> [--revision <hash>]` | Export self-play training data    |
 
 ## How It Works
 

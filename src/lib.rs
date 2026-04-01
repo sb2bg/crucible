@@ -5,6 +5,7 @@ pub mod git;
 pub mod scheduler;
 pub mod sprt;
 pub mod storage;
+pub mod training;
 pub mod tui;
 pub mod types;
 pub mod web;

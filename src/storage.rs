@@ -454,6 +454,52 @@ impl Storage {
         }
     }
 
+    pub fn get_revision_by_ref_prefix(
+        &self,
+        engine_id: &str,
+        revision_ref: &str,
+    ) -> Result<Option<EngineRevision>> {
+        if let Some(revision) = self.get_revision_by_hash_prefix(engine_id, revision_ref)? {
+            return Ok(Some(revision));
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let like = format!("{}%", revision_ref);
+        let mut stmt = conn.prepare(
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+             FROM revisions
+             WHERE engine_id = ?1 AND tag IS NOT NULL AND tag LIKE ?2
+             ORDER BY commit_date ASC
+             LIMIT 2",
+        )?;
+
+        let revisions = stmt
+            .query_map(params![engine_id, like], |row| {
+                let date_str: String = row.get(4)?;
+                let status_str: String = row.get(9)?;
+                let binary_str: Option<String> = row.get(8)?;
+                Ok(EngineRevision {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    commit_hash: row.get(2)?,
+                    commit_message: row.get(3)?,
+                    commit_date: parse_timestamp_column(&date_str, 4)?,
+                    branch: row.get(5)?,
+                    tag: row.get(6)?,
+                    is_release: row.get::<_, i32>(7)? != 0,
+                    binary_path: binary_str.map(std::path::PathBuf::from),
+                    build_status: decode_build_status(&status_str)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        match revisions.as_slice() {
+            [] => Ok(None),
+            [revision] => Ok(Some(revision.clone())),
+            _ => anyhow::bail!("Revision reference '{}' is ambiguous", revision_ref),
+        }
+    }
+
     pub fn update_build_status(
         &self,
         revision_id: &str,
@@ -1593,6 +1639,23 @@ mod tests {
         assert_eq!((wins, losses, draws), (0, 0, 0));
         assert_eq!(decode_sprt_result(&sprt_result)?, SprtResult::Inconclusive);
         assert_eq!(games, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_revision_by_tag_prefix() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        let mut rev = test_revision(&engine.id, "rev-tagged", "abcd");
+        rev.tag = Some("v1.2.0".into());
+
+        storage.insert_engine(&engine)?;
+        storage.insert_revision(&rev)?;
+
+        let resolved = storage
+            .get_revision_by_ref_prefix(&engine.id, "v1.2")?
+            .expect("tagged revision should resolve");
+        assert_eq!(resolved.id, rev.id);
         Ok(())
     }
 }

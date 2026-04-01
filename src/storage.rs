@@ -120,7 +120,8 @@ impl Storage {
                 result TEXT NOT NULL,
                 pgn TEXT NOT NULL,
                 opening TEXT NOT NULL DEFAULT '',
-                move_count INTEGER NOT NULL DEFAULT 0
+                move_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS bisect_sessions (
@@ -161,6 +162,7 @@ impl Storage {
         self.ensure_bisect_column(&tx, "candidate_revision_id", "TEXT")?;
         self.ensure_bisect_column(&tx, "candidate_index", "INTEGER")?;
         self.ensure_revision_column(&tx, "binary_fingerprint", "TEXT")?;
+        self.ensure_games_column(&tx, "created_at", "TEXT")?;
         tx.execute_batch(
             "
             INSERT OR IGNORE INTO revision_branches (revision_id, branch)
@@ -229,6 +231,28 @@ impl Storage {
             conn.execute(
                 &format!(
                     "ALTER TABLE revisions ADD COLUMN {} {}",
+                    column_name, column_sql
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_games_column(
+        &self,
+        conn: &Connection,
+        column_name: &str,
+        column_sql: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(games)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == column_name) {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE games ADD COLUMN {} {}",
                     column_name, column_sql
                 ),
                 [],
@@ -770,8 +794,8 @@ impl Storage {
     pub fn insert_game(&self, job_id: &str, record: &GameRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO games (test_job_id, game_number, result, pgn, opening, move_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO games (test_job_id, game_number, result, pgn, opening, move_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 job_id,
                 record.game_number,
@@ -779,6 +803,7 @@ impl Storage {
                 record.pgn,
                 record.opening,
                 record.move_count,
+                chrono::Utc::now().to_rfc3339(),
             ],
         )?;
         Ok(())
@@ -1211,6 +1236,12 @@ impl Storage {
             [],
             |r| r.get(0),
         )?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
+        let recent_games: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM games WHERE created_at IS NOT NULL AND created_at >= ?1",
+            params![cutoff],
+            |r| r.get(0),
+        )?;
 
         Ok(SystemStatus {
             active_jobs: active,
@@ -1219,7 +1250,7 @@ impl Storage {
             engines_tracked: engines,
             total_games_played: total_games,
             uptime_seconds: 0, // Set by the caller
-            games_per_minute: 0.0,
+            games_per_minute: recent_games as f64 / 15.0,
         })
     }
 
@@ -1762,6 +1793,37 @@ mod tests {
             .get_revision_by_ref_prefix(&engine.id, "v1.2")?
             .expect("tagged revision should resolve");
         assert_eq!(resolved.id, rev.id);
+        Ok(())
+    }
+
+    #[test]
+    fn system_status_reports_recent_games_per_minute() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        let base = test_revision(&engine.id, "rev-base", "aaaa");
+        let dev = test_revision(&engine.id, "rev-dev", "bbbb");
+        let job = test_job(&engine.id, &dev.id, &base.id);
+
+        storage.insert_engine(&engine)?;
+        storage.insert_revision(&base)?;
+        storage.insert_revision(&dev)?;
+        storage.insert_test_job(&job)?;
+
+        for game_number in 1..=3 {
+            storage.insert_game(
+                &job.id,
+                &GameRecord {
+                    game_number,
+                    result: GameResult::Draw,
+                    pgn: "*".into(),
+                    opening: "startpos".into(),
+                    move_count: 1,
+                },
+            )?;
+        }
+
+        let status = storage.get_system_status()?;
+        assert!(status.games_per_minute > 0.0);
         Ok(())
     }
 

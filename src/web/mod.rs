@@ -96,6 +96,7 @@ struct RevisionDetailsResponse {
     commit: CommitDetails,
     compare_to_parent: DiffSummary,
     related_jobs: Vec<JobSummary>,
+    lineage: RevisionLineage,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +107,29 @@ struct CompareResponse {
     head_revision: EngineRevision,
     summary: DiffSummary,
     related_jobs: Vec<JobSummary>,
+    base_lineage: RevisionLineage,
+    head_lineage: RevisionLineage,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct LineageRef {
+    revision_id: String,
+    commit_hash: String,
+    commit_message: String,
+    branch: String,
+    tag: Option<String>,
+    binary_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct RevisionLineage {
+    branch: String,
+    previous_branch_revision: Option<LineageRef>,
+    next_branch_revision: Option<LineageRef>,
+    previous_distinct_binary_revision: Option<LineageRef>,
+    next_distinct_binary_revision: Option<LineageRef>,
+    skipped_identical_previous: usize,
+    skipped_identical_next: usize,
 }
 
 async fn index_handler() -> Html<&'static str> {
@@ -496,6 +520,7 @@ fn load_revision_details(
     let commit = git_mgr.commit_details(&repo, &revision.commit_hash)?;
     let compare_to_parent = git_mgr.diff_for_revision(&repo, &revision.commit_hash)?;
     let related_jobs = state.storage.list_jobs_for_revision(&revision.id, 8)?;
+    let lineage = build_revision_lineage(&state.storage, &engine.id, &revision)?;
 
     Ok(RevisionDetailsResponse {
         engine_id: engine.id,
@@ -504,6 +529,7 @@ fn load_revision_details(
         commit,
         compare_to_parent,
         related_jobs,
+        lineage,
     })
 }
 
@@ -539,6 +565,8 @@ fn load_compare_details(
         &head_revision.commit_hash,
     )?;
     let related_jobs = state.storage.list_jobs_for_revision(&head_revision.id, 8)?;
+    let base_lineage = build_revision_lineage(&state.storage, &engine.id, &base_revision)?;
+    let head_lineage = build_revision_lineage(&state.storage, &engine.id, &head_revision)?;
 
     Ok(CompareResponse {
         engine_id: engine.id,
@@ -547,7 +575,80 @@ fn load_compare_details(
         head_revision,
         summary,
         related_jobs,
+        base_lineage,
+        head_lineage,
     })
+}
+
+fn build_revision_lineage(
+    storage: &Storage,
+    engine_id: &str,
+    revision: &EngineRevision,
+) -> anyhow::Result<RevisionLineage> {
+    let mut branch_revisions = storage
+        .get_branch_revisions_for_engine(engine_id)?
+        .into_iter()
+        .filter(|candidate| candidate.branch == revision.branch)
+        .collect::<Vec<_>>();
+    branch_revisions.sort_by_key(|candidate| candidate.commit_date);
+
+    let index = branch_revisions
+        .iter()
+        .position(|candidate| candidate.id == revision.id)
+        .ok_or_else(|| anyhow::anyhow!("revision not found on branch"))?;
+
+    let previous_branch_revision = index
+        .checked_sub(1)
+        .and_then(|idx| branch_revisions.get(idx))
+        .map(lineage_ref);
+    let next_branch_revision = branch_revisions.get(index + 1).map(lineage_ref);
+
+    let mut skipped_identical_previous = 0;
+    let mut previous_distinct_binary_revision = None;
+    for candidate in branch_revisions[..index].iter().rev() {
+        if candidate.binary_fingerprint.is_some()
+            && candidate.binary_fingerprint == revision.binary_fingerprint
+        {
+            skipped_identical_previous += 1;
+            continue;
+        }
+        previous_distinct_binary_revision = Some(lineage_ref(candidate));
+        break;
+    }
+
+    let mut skipped_identical_next = 0;
+    let mut next_distinct_binary_revision = None;
+    for candidate in branch_revisions.iter().skip(index + 1) {
+        if candidate.binary_fingerprint.is_some()
+            && candidate.binary_fingerprint == revision.binary_fingerprint
+        {
+            skipped_identical_next += 1;
+            continue;
+        }
+        next_distinct_binary_revision = Some(lineage_ref(candidate));
+        break;
+    }
+
+    Ok(RevisionLineage {
+        branch: revision.branch.clone(),
+        previous_branch_revision,
+        next_branch_revision,
+        previous_distinct_binary_revision,
+        next_distinct_binary_revision,
+        skipped_identical_previous,
+        skipped_identical_next,
+    })
+}
+
+fn lineage_ref(revision: &EngineRevision) -> LineageRef {
+    LineageRef {
+        revision_id: revision.id.clone(),
+        commit_hash: revision.commit_hash.clone(),
+        commit_message: revision.commit_message.clone(),
+        branch: revision.branch.clone(),
+        tag: revision.tag.clone(),
+        binary_fingerprint: revision.binary_fingerprint.clone(),
+    }
 }
 
 fn sync_engine_revisions(

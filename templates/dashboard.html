@@ -1652,6 +1652,7 @@
           </div>
           ${commit.body ? `<pre class="code-block" style="margin-top:12px;">${escapeHtml(commit.body)}</pre>` : ''}
         </section>
+        ${renderLineageSection(payload.engine_id, 'Revision lineage', payload.lineage)}
         ${renderDiffSection(diff, payload.engine_id, revision.commit_hash, diff.base_hash || '')}
         ${renderRelatedJobs(payload.related_jobs)}
       </div>
@@ -1696,6 +1697,7 @@
             </div>
           </div>
         </section>
+        ${renderCompareLineageSection(payload.engine_id, payload.base_lineage, payload.head_lineage)}
         ${renderDiffSection(payload.summary, payload.engine_id, head.commit_hash, base.commit_hash)}
         ${renderRelatedJobs(payload.related_jobs)}
       </div>
@@ -1784,6 +1786,74 @@
         </div>
       </section>
     `;
+  }
+
+  function renderCompareLineageSection(engineId, baseLineage, headLineage) {
+    return `
+      <section class="detail-card">
+        <div class="detail-head">
+          <h3 class="detail-title">Lineage</h3>
+        </div>
+        <div class="drawer-grid">
+          ${renderLineageBlock(engineId, 'Base lineage', baseLineage)}
+          ${renderLineageBlock(engineId, 'Head lineage', headLineage)}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderLineageSection(engineId, title, lineage) {
+    return `
+      <section class="detail-card">
+        <div class="detail-head">
+          <h3 class="detail-title">${escapeHtml(title)}</h3>
+        </div>
+        ${renderLineageBlock(engineId, '', lineage)}
+      </section>
+    `;
+  }
+
+  function renderLineageBlock(engineId, title, lineage) {
+    return `
+      <div>
+        ${title ? `<div class="detail-subtitle" style="margin-bottom:10px;">${escapeHtml(title)}</div>` : ''}
+        <div class="kv-grid">
+          <div>
+            <div class="kv-label">Previous on branch</div>
+            <div class="kv-value">${renderLineageRef(engineId, lineage.previous_branch_revision)}</div>
+          </div>
+          <div>
+            <div class="kv-label">Next on branch</div>
+            <div class="kv-value">${renderLineageRef(engineId, lineage.next_branch_revision)}</div>
+          </div>
+          <div>
+            <div class="kv-label">Previous distinct binary</div>
+            <div class="kv-value">${renderLineageRef(engineId, lineage.previous_distinct_binary_revision)}</div>
+          </div>
+          <div>
+            <div class="kv-label">Next distinct binary</div>
+            <div class="kv-value">${renderLineageRef(engineId, lineage.next_distinct_binary_revision)}</div>
+          </div>
+          <div>
+            <div class="kv-label">Skipped identical before</div>
+            <div class="kv-value mono">${Number(lineage.skipped_identical_previous || 0).toLocaleString()}</div>
+          </div>
+          <div>
+            <div class="kv-label">Skipped identical after</div>
+            <div class="kv-value mono">${Number(lineage.skipped_identical_next || 0).toLocaleString()}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderLineageRef(engineId, revision) {
+    if (!revision) return '—';
+    const label = revision.tag
+      ? `${revision.commit_hash.slice(0, 8)} (${revision.tag})`
+      : revision.commit_hash.slice(0, 8);
+    const summary = revision.commit_message ? ` <span class="detail-subtitle">${escapeHtml(revision.commit_message)}</span>` : '';
+    return `<button class="mono-link" type="button" data-open-revision="${escapeHtmlAttr(engineId)}|${escapeHtmlAttr(revision.commit_hash)}">${escapeHtml(label)}</button>${summary}`;
   }
 
   function bindDetailActions() {

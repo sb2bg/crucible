@@ -542,11 +542,17 @@ async fn run_test_loop(storage: Storage, config: Config) {
         }
 
         // 2. Process queued jobs
+        let mut workers = tokio::task::JoinSet::new();
         loop {
-            let mut batch = Vec::new();
-            while batch.len() < worker_count {
+            while workers.len() < worker_count {
                 match storage.claim_next_job() {
-                    Ok(Some(job)) => batch.push(job),
+                    Ok(Some(job)) => {
+                        let job_storage = storage.clone();
+                        let job_config = config.clone();
+                        workers.spawn(async move {
+                            process_claimed_job(job_storage, job_config, job).await;
+                        });
+                    }
                     Ok(None) => break,
                     Err(err) => {
                         tracing::error!("Failed to claim next job: {}", err);
@@ -555,21 +561,12 @@ async fn run_test_loop(storage: Storage, config: Config) {
                 }
             }
 
-            if batch.is_empty() {
+            if workers.is_empty() {
                 break;
             }
 
-            let mut handles = Vec::with_capacity(batch.len());
-            for job in batch {
-                let job_storage = storage.clone();
-                let job_config = config.clone();
-                handles.push(tokio::spawn(async move {
-                    process_claimed_job(job_storage, job_config, job).await;
-                }));
-            }
-
-            for handle in handles {
-                if let Err(err) = handle.await {
+            if let Some(result) = workers.join_next().await {
+                if let Err(err) = result {
                     tracing::error!("Job worker task panicked: {}", err);
                 }
             }

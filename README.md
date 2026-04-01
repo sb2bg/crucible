@@ -26,14 +26,14 @@ Crucible is built for the solo dev. One command, your machine, your engine, your
 ## Quick Start
 
 ```bash
-# Install
-cargo install crucible
+# Build from source
+cargo build --release
 
 # Initialize config
-crucible init
+./target/release/crucible init
 
 # Add your engine
-crucible add \
+./target/release/crucible add \
   --name my-engine \
   --repo https://github.com/you/your-engine \
   --build "make" \
@@ -42,10 +42,10 @@ crucible add \
   --start-from v1.0.0
 
 # Start testing
-crucible run
+./target/release/crucible run
 
 # Or with the terminal monitor
-crucible run --tui
+./target/release/crucible run --tui
 ```
 
 The web dashboard is available at `http://localhost:8877` by default.
@@ -70,6 +70,7 @@ docker compose up --build -d
 ```
 
 The provided `docker-compose.yml` mounts:
+
 - `./crucible.toml` into `/work/crucible.toml`
 - a named Docker volume at `/work/.crucible` for the SQLite DB, cloned repos, and build artifacts
 
@@ -128,6 +129,7 @@ If `server.admin_token` is set, the web admin panel sends it as a Bearer token; 
 ## CI/CD
 
 GitHub Actions now includes a workflow that:
+
 - runs `cargo fmt --check`, `cargo check --locked`, and `cargo test --locked`
 - builds the Docker image on pull requests
 - publishes the image to GHCR on pushes to `main` and version tags

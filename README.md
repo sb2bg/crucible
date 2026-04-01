@@ -93,12 +93,14 @@ Edit `crucible.toml`:
 [server]
 web_port = 8877
 web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+admin_token = "change-me" # optional; protects /api/admin/* with Bearer auth
 
 [testing]
 concurrency = 4           # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance
+poll_interval_seconds = 60 # how often the daemon checks for new commits/jobs
 
 [testing.time_control]
 base_ms = 10000            # 10+0.1 STC
@@ -121,6 +123,7 @@ start_from = "v1.0.0"
 
 Entries under `[[engines]]` are imported automatically when `crucible run` starts.
 For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
+If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it.
 
 ## CI/CD
 

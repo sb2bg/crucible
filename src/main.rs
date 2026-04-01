@@ -413,7 +413,10 @@ async fn run_test_loop(storage: Storage, config: Config) {
             Ok(e) => e,
             Err(err) => {
                 tracing::error!("Failed to get engines: {}", err);
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    config.testing.poll_interval_seconds,
+                ))
+                .await;
                 continue;
             }
         };
@@ -494,7 +497,10 @@ async fn run_test_loop(storage: Storage, config: Config) {
         }
 
         // Sleep before next polling cycle
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config.testing.poll_interval_seconds,
+        ))
+        .await;
     }
 }
 

@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -117,8 +117,12 @@ async fn active_bisect_sessions_handler(State(state): State<Arc<WebState>>) -> i
 
 async fn add_engine_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(request): Json<AddEngineRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     let branches = request
         .branches
         .iter()
@@ -145,8 +149,12 @@ async fn add_engine_handler(
 
 async fn delete_engine_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path(engine_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     let engine = match state.storage.get_engine_by_id(&engine_id) {
         Ok(engine) => engine,
         Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
@@ -175,8 +183,12 @@ async fn delete_engine_handler(
 
 async fn queue_manual_test_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(request): Json<ManualTestRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     match queue_manual_test(&state, request) {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
@@ -185,8 +197,12 @@ async fn queue_manual_test_handler(
 
 async fn start_bisect_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(request): Json<StartBisectRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     match start_bisect(&state, request) {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
@@ -195,8 +211,12 @@ async fn start_bisect_handler(
 
 async fn cancel_job_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     let status = match state.storage.get_job_status(&job_id) {
         Ok(Some(status)) => status,
         Ok(None) => {
@@ -226,8 +246,12 @@ async fn cancel_job_handler(
 
 async fn cancel_bisect_session_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     match state.storage.cancel_bisect_session(&session_id) {
         Ok(true) => Json(json!({ "cancelled": true })).into_response(),
         Ok(false) => json_error(
@@ -467,6 +491,26 @@ fn json_error(status: StatusCode, err: impl std::fmt::Display) -> Response {
         })),
     )
         .into_response()
+}
+
+fn authorize_admin(headers: &HeaderMap, state: &WebState) -> Result<(), Response> {
+    let Some(expected_token) = state.config.server.admin_token.as_deref() else {
+        return Ok(());
+    };
+
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+
+    match provided {
+        Some(token) if token == expected_token => Ok(()),
+        _ => Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "admin bearer token required",
+        )),
+    }
 }
 
 /// The dashboard as a single embedded HTML page.

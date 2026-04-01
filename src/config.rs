@@ -36,6 +36,8 @@ pub struct ServerConfig {
     pub web_port: u16,
     #[serde(default = "default_web_host")]
     pub web_host: String,
+    /// Optional bearer token required for /api/admin/* routes
+    pub admin_token: Option<String>,
 }
 
 fn default_web_port() -> u16 {
@@ -50,6 +52,7 @@ impl Default for ServerConfig {
         Self {
             web_port: default_web_port(),
             web_host: default_web_host(),
+            admin_token: None,
         }
     }
 }
@@ -76,6 +79,9 @@ pub struct TestingConfig {
     /// Number of threads per engine
     #[serde(default = "default_engine_threads")]
     pub engine_threads: u32,
+    /// How often the daemon polls repos and schedules new work
+    #[serde(default = "default_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
 }
 
 fn default_concurrency() -> u32 {
@@ -90,6 +96,9 @@ fn default_hash_mb() -> u32 {
 fn default_engine_threads() -> u32 {
     1
 }
+fn default_poll_interval_seconds() -> u64 {
+    60
+}
 
 impl Default for TestingConfig {
     fn default() -> Self {
@@ -101,6 +110,7 @@ impl Default for TestingConfig {
             max_games: default_max_games(),
             hash_mb: default_hash_mb(),
             engine_threads: default_engine_threads(),
+            poll_interval_seconds: default_poll_interval_seconds(),
         }
     }
 }
@@ -248,6 +258,9 @@ impl Config {
         if self.testing.engine_threads == 0 {
             anyhow::bail!("testing.engine_threads must be at least 1");
         }
+        if self.testing.poll_interval_seconds == 0 {
+            anyhow::bail!("testing.poll_interval_seconds must be at least 1");
+        }
         if self.testing.time_control.base_ms == 0 && self.testing.time_control.nodes.is_none() {
             anyhow::bail!("time control must specify positive base_ms or nodes");
         }
@@ -262,6 +275,14 @@ impl Config {
         }
         if !(0.0 < self.testing.sprt.beta && self.testing.sprt.beta < 1.0) {
             anyhow::bail!("testing.sprt.beta must be between 0 and 1");
+        }
+        if self
+            .server
+            .admin_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!("server.admin_token cannot be empty when set");
         }
         Ok(())
     }

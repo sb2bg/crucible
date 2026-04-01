@@ -705,6 +705,12 @@
     <div class="panel-head">
       <div>
         <h2 class="panel-title">Admin</h2>
+        <p class="panel-subtitle">optional bearer token can be stored locally in this browser</p>
+      </div>
+      <div class="controls">
+        <input id="admin-token-input" placeholder="admin bearer token" style="min-width:240px;">
+        <button type="button" id="save-admin-token">Save token</button>
+        <button type="button" id="clear-admin-token">Clear</button>
       </div>
     </div>
 
@@ -816,7 +822,8 @@
   const state = {
     engines: [],
     chartCache: {},
-    activeTab: 'overview'
+    activeTab: 'overview',
+    adminToken: localStorage.getItem('crucible.adminToken') || ''
   };
 
   const tabs = [...document.querySelectorAll('.tab')];
@@ -832,13 +839,20 @@
   document.getElementById('add-engine-form').addEventListener('submit', handleAddEngine);
   document.getElementById('manual-test-form').addEventListener('submit', handleManualTest);
   document.getElementById('bisect-form').addEventListener('submit', handleBisect);
+  document.getElementById('save-admin-token').addEventListener('click', saveAdminToken);
+  document.getElementById('clear-admin-token').addEventListener('click', clearAdminToken);
+  document.getElementById('admin-token-input').value = state.adminToken;
 
   async function api(path, options = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    };
+    if (path.startsWith('/api/admin/') && state.adminToken) {
+      headers.Authorization = `Bearer ${state.adminToken}`;
+    }
     const response = await fetch(path, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {})
-      },
+      headers,
       ...options
     });
     const contentType = response.headers.get('content-type') || '';
@@ -860,6 +874,25 @@
       toast.className = 'toast';
       toast.textContent = '';
     }, 3500);
+  }
+
+  function saveAdminToken() {
+    const input = document.getElementById('admin-token-input');
+    state.adminToken = input.value.trim();
+    if (state.adminToken) {
+      localStorage.setItem('crucible.adminToken', state.adminToken);
+      showToast('admin token saved locally', 'info');
+    } else {
+      localStorage.removeItem('crucible.adminToken');
+      showToast('admin token cleared', 'info');
+    }
+  }
+
+  function clearAdminToken() {
+    state.adminToken = '';
+    localStorage.removeItem('crucible.adminToken');
+    document.getElementById('admin-token-input').value = '';
+    showToast('admin token cleared', 'info');
   }
 
   function switchTab(tabName) {

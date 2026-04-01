@@ -1,6 +1,7 @@
 [server]
 web_port = 8877
 web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+admin_token = "wekjfhwkjehqqedwefdweswecjuegrtfs"
 
 [testing]
 concurrency = 4           # Test jobs to run in parallel

@@ -12,3 +12,5 @@
 .vscode/
 *.swp
 *.swo
+
+.crucible

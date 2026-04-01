@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Crucible</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>
   :root {
     --bg: #0f141b;
@@ -385,6 +386,35 @@
   .positive { color: var(--green); }
   .negative { color: var(--red); }
 
+  .subtle-link,
+  .mono-link {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  .subtle-link {
+    color: var(--accent-2);
+    font-weight: 600;
+  }
+
+  .mono-link {
+    color: var(--accent-2);
+    text-decoration: underline;
+    text-decoration-color: rgba(125, 184, 255, 0.3);
+    text-underline-offset: 2px;
+  }
+
+  .subtle-link:hover,
+  .mono-link:hover {
+    color: #b5d5ff;
+  }
+
   button,
   input,
   textarea,
@@ -533,6 +563,168 @@
     text-align: center;
   }
 
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 8, 13, 0.68);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease;
+    z-index: 20;
+  }
+
+  .drawer-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: min(760px, 100vw);
+    height: 100vh;
+    background: linear-gradient(180deg, #182230 0%, #101720 100%);
+    border-left: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    transform: translateX(100%);
+    transition: transform 180ms ease;
+    z-index: 21;
+    display: grid;
+    grid-template-rows: auto 1fr;
+  }
+
+  .drawer.open {
+    transform: translateX(0);
+  }
+
+  .drawer-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 18px 14px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(11, 17, 24, 0.42);
+    backdrop-filter: blur(8px);
+  }
+
+  .drawer-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .drawer-body {
+    overflow-y: auto;
+    padding: 18px;
+    display: grid;
+    gap: 14px;
+  }
+
+  .drawer-grid {
+    display: grid;
+    gap: 14px;
+  }
+
+  .detail-card {
+    background: rgba(12, 18, 26, 0.6);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+  }
+
+  .detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .detail-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .detail-subtitle {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .kv-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+  }
+
+  .kv-label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .kv-value {
+    margin-top: 4px;
+    word-break: break-word;
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .summary-stat {
+    background: var(--panel-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+  }
+
+  .file-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .file-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--panel-3);
+    border: 1px solid var(--line);
+  }
+
+  .file-path {
+    word-break: break-word;
+  }
+
+  .code-block {
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: #0a0f15;
+    color: #dbe6f3;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .inline-note {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
   .hidden { display: none !important; }
 
   @media (max-width: 1200px) {
@@ -549,7 +741,9 @@
     .bisect-head { flex-direction: column; align-items: stretch; }
     .statusbar { justify-content: flex-start; }
     .stats,
-    .form-grid.two { grid-template-columns: 1fr; }
+    .form-grid.two,
+    .kv-grid,
+    .summary-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -807,6 +1001,20 @@
   </section>
 </div>
 
+<div class="drawer-backdrop" id="details-backdrop"></div>
+<aside class="drawer" id="details-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <h2 class="drawer-title" id="details-title">Revision details</h2>
+      <div class="detail-subtitle" id="details-subtitle"></div>
+    </div>
+    <button type="button" id="details-close">Close</button>
+  </div>
+  <div class="drawer-body" id="details-body">
+    <div class="empty">Select a revision to inspect.</div>
+  </div>
+</aside>
+
 <script>
   const colors = {
     text: '#e6edf6',
@@ -823,7 +1031,8 @@
     engines: [],
     chartCache: {},
     activeTab: 'overview',
-    adminToken: localStorage.getItem('crucible.adminToken') || ''
+    adminToken: localStorage.getItem('crucible.adminToken') || '',
+    details: null
   };
 
   const tabs = [...document.querySelectorAll('.tab')];
@@ -841,7 +1050,12 @@
   document.getElementById('bisect-form').addEventListener('submit', handleBisect);
   document.getElementById('save-admin-token').addEventListener('click', saveAdminToken);
   document.getElementById('clear-admin-token').addEventListener('click', clearAdminToken);
+  document.getElementById('details-close').addEventListener('click', closeDetails);
+  document.getElementById('details-backdrop').addEventListener('click', closeDetails);
   document.getElementById('admin-token-input').value = state.adminToken;
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeDetails();
+  });
 
   async function api(path, options = {}) {
     const headers = {
@@ -863,6 +1077,49 @@
       throw new Error(payload.error || response.statusText || 'Request failed');
     }
     return payload;
+  }
+
+  function openDetailsShell(title, subtitle, bodyHtml) {
+    state.details = { title, subtitle };
+    document.getElementById('details-title').textContent = title;
+    document.getElementById('details-subtitle').textContent = subtitle || '';
+    document.getElementById('details-body').innerHTML = bodyHtml;
+    document.getElementById('details-backdrop').classList.add('open');
+    const drawer = document.getElementById('details-drawer');
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeDetails() {
+    state.details = null;
+    document.getElementById('details-backdrop').classList.remove('open');
+    const drawer = document.getElementById('details-drawer');
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+
+  async function openRevisionDetails(engineId, revisionRef) {
+    const engine = state.engines.find(candidate => candidate.id === engineId);
+    const title = revisionRef.slice(0, 8);
+    openDetailsShell(title, engine ? engine.name : engineId, '<div class="empty">Loading revision details...</div>');
+    try {
+      const payload = await api(`/api/revisions/${encodeURIComponent(engineId)}/${encodeURIComponent(revisionRef)}`);
+      renderRevisionDetails(payload);
+    } catch (error) {
+      openDetailsShell(title, engine ? engine.name : engineId, `<div class="empty">${escapeHtml(error.message)}</div>`);
+    }
+  }
+
+  async function openCompareDetails(engineId, baseRef, headRef) {
+    const engine = state.engines.find(candidate => candidate.id === engineId);
+    const title = `${headRef.slice(0, 8)} vs ${baseRef.slice(0, 8)}`;
+    openDetailsShell(title, engine ? engine.name : engineId, '<div class="empty">Loading comparison...</div>');
+    try {
+      const payload = await api(`/api/compare/${encodeURIComponent(engineId)}?base=${encodeURIComponent(baseRef)}&head=${encodeURIComponent(headRef)}`);
+      renderCompareDetails(payload);
+    } catch (error) {
+      openDetailsShell(title, engine ? engine.name : engineId, `<div class="empty">${escapeHtml(error.message)}</div>`);
+    }
   }
 
   function showToast(message, kind = 'success') {
@@ -1048,7 +1305,7 @@
     const canvas = document.getElementById(`${view}-chart`);
     const tooltip = document.getElementById(`${view}-tooltip`);
     if (!select || !canvas || !tooltip || !select.value) {
-      drawEloChart(canvas, tooltip, []);
+      drawEloChart(canvas, tooltip, [], null);
       return;
     }
 
@@ -1063,10 +1320,10 @@
         points = [];
       }
     }
-    drawEloChart(canvas, tooltip, points);
+    drawEloChart(canvas, tooltip, points, engineId);
   }
 
-  function drawEloChart(canvas, tooltipEl, points) {
+  function drawEloChart(canvas, tooltipEl, points, engineId) {
     if (!canvas || !tooltipEl) return;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
@@ -1088,6 +1345,7 @@
       ctx.fillText('No completed Elo data.', width / 2, height / 2);
       canvas.onmousemove = null;
       canvas.onmouseleave = null;
+      canvas.onclick = null;
       tooltipEl.style.display = 'none';
       return;
     }
@@ -1219,6 +1477,24 @@
     canvas.onmouseleave = () => {
       tooltipEl.style.display = 'none';
     };
+
+    canvas.onclick = event => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      const my = event.clientY - rect.top;
+      let best = null;
+      let bestDistance = 18;
+      hitPoints.forEach(candidate => {
+        const distance = Math.hypot(mx - candidate.x, my - candidate.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = candidate;
+        }
+      });
+      if (best && engineId) {
+        openRevisionDetails(engineId, best.point.commit_hash);
+      }
+    };
   }
 
   async function loadJobs() {
@@ -1248,18 +1524,35 @@
           <tr>
             <td><span class="badge badge-${job.status.toLowerCase()}">${job.status}</span></td>
             <td>${escapeHtml(job.engine_name)}</td>
-            <td class="mono">${escapeHtml(job.dev_commit_hash.slice(0, 8))}</td>
-            <td class="mono">${escapeHtml(job.base_commit_hash.slice(0, 8))}</td>
+            <td class="mono"><button class="mono-link" type="button" data-open-revision="${job.engine_id}|${job.dev_commit_hash}">${escapeHtml(job.dev_commit_hash.slice(0, 8))}</button></td>
+            <td class="mono"><button class="mono-link" type="button" data-open-revision="${job.engine_id}|${job.base_commit_hash}">${escapeHtml(job.base_commit_hash.slice(0, 8))}</button></td>
             <td>${escapeHtml(job.job_type)}</td>
             <td class="mono">${job.wins} / ${job.draws} / ${job.losses}</td>
             <td>${elo}</td>
             <td>${sprt}</td>
             <td title="${escapeHtml(job.created_at)}">${timeAgo(job.created_at)}</td>
-            <td>${action}</td>
+            <td>
+              <div class="inline-actions">
+                <button class="button-inline" type="button" data-open-compare="${job.engine_id}|${job.base_commit_hash}|${job.dev_commit_hash}">Compare</button>
+                ${action}
+              </div>
+            </td>
           </tr>
         `;
       }).join('');
 
+      body.querySelectorAll('[data-open-revision]').forEach(button => {
+        button.addEventListener('click', () => {
+          const [engineId, revisionRef] = button.dataset.openRevision.split('|');
+          openRevisionDetails(engineId, revisionRef);
+        });
+      });
+      body.querySelectorAll('[data-open-compare]').forEach(button => {
+        button.addEventListener('click', () => {
+          const [engineId, baseRef, headRef] = button.dataset.openCompare.split('|');
+          openCompareDetails(engineId, baseRef, headRef);
+        });
+      });
       body.querySelectorAll('[data-cancel-job]').forEach(button => {
         button.addEventListener('click', () => cancelJob(button.dataset.cancelJob, button));
       });
@@ -1317,6 +1610,196 @@
     } catch (error) {
       showToast(error.message, 'error');
     }
+  }
+
+  function renderRevisionDetails(payload) {
+    const revision = payload.revision;
+    const commit = payload.commit;
+    const diff = payload.compare_to_parent;
+    document.getElementById('details-title').textContent = revision.commit_hash.slice(0, 12);
+    document.getElementById('details-subtitle').textContent = `${payload.engine_name} • ${revision.branch}`;
+    document.getElementById('details-body').innerHTML = `
+      <div class="drawer-grid">
+        <section class="detail-card">
+          <div class="detail-head">
+            <div>
+              <h3 class="detail-title">${escapeHtml(revision.commit_message)}</h3>
+              <div class="detail-subtitle">${escapeHtml(formatAbsoluteTime(commit.author_time))}</div>
+            </div>
+            <div class="tag-row">
+              <span class="tag">${escapeHtml(revision.branch)}</span>
+              ${revision.tag ? `<span class="tag">${escapeHtml(revision.tag)}</span>` : ''}
+              <span class="tag">${escapeHtml(revision.build_status)}</span>
+            </div>
+          </div>
+          <div class="kv-grid">
+            <div>
+              <div class="kv-label">Commit</div>
+              <div class="kv-value mono">${escapeHtml(revision.commit_hash)}</div>
+            </div>
+            <div>
+              <div class="kv-label">Parent</div>
+              <div class="kv-value mono">${commit.parent_hashes.length ? `<button class="mono-link" type="button" data-open-revision="${escapeHtmlAttr(payload.engine_id)}|${escapeHtmlAttr(commit.parent_hashes[0])}">${escapeHtml(commit.parent_hashes[0])}</button>` : 'Initial commit'}</div>
+            </div>
+            <div>
+              <div class="kv-label">Author</div>
+              <div class="kv-value">${escapeHtml(formatActor(commit.author))}</div>
+            </div>
+            <div>
+              <div class="kv-label">Committer</div>
+              <div class="kv-value">${escapeHtml(formatActor(commit.committer))}</div>
+            </div>
+          </div>
+          ${commit.body ? `<pre class="code-block" style="margin-top:12px;">${escapeHtml(commit.body)}</pre>` : ''}
+        </section>
+        ${renderDiffSection(diff, payload.engine_id, revision.commit_hash, diff.base_hash || '')}
+        ${renderRelatedJobs(payload.related_jobs)}
+      </div>
+    `;
+    bindDetailActions();
+  }
+
+  function renderCompareDetails(payload) {
+    const base = payload.base_revision;
+    const head = payload.head_revision;
+    document.getElementById('details-title').textContent = `${head.commit_hash.slice(0, 8)} vs ${base.commit_hash.slice(0, 8)}`;
+    document.getElementById('details-subtitle').textContent = `${payload.engine_name} • ${head.branch}`;
+    document.getElementById('details-body').innerHTML = `
+      <div class="drawer-grid">
+        <section class="detail-card">
+          <div class="detail-head">
+            <div>
+              <h3 class="detail-title">Comparison</h3>
+              <div class="detail-subtitle">${escapeHtml(head.commit_message)}</div>
+            </div>
+            <div class="tag-row">
+              <span class="tag">base ${escapeHtml(base.commit_hash.slice(0, 8))}</span>
+              <span class="tag">head ${escapeHtml(head.commit_hash.slice(0, 8))}</span>
+            </div>
+          </div>
+          <div class="kv-grid">
+            <div>
+              <div class="kv-label">Base</div>
+              <div class="kv-value mono"><button class="mono-link" type="button" data-open-revision="${escapeHtmlAttr(payload.engine_id)}|${escapeHtmlAttr(base.commit_hash)}">${escapeHtml(base.commit_hash)}</button></div>
+            </div>
+            <div>
+              <div class="kv-label">Head</div>
+              <div class="kv-value mono"><button class="mono-link" type="button" data-open-revision="${escapeHtmlAttr(payload.engine_id)}|${escapeHtmlAttr(head.commit_hash)}">${escapeHtml(head.commit_hash)}</button></div>
+            </div>
+            <div>
+              <div class="kv-label">Base message</div>
+              <div class="kv-value">${escapeHtml(base.commit_message)}</div>
+            </div>
+            <div>
+              <div class="kv-label">Head message</div>
+              <div class="kv-value">${escapeHtml(head.commit_message)}</div>
+            </div>
+          </div>
+        </section>
+        ${renderDiffSection(payload.summary, payload.engine_id, head.commit_hash, base.commit_hash)}
+        ${renderRelatedJobs(payload.related_jobs)}
+      </div>
+    `;
+    bindDetailActions();
+  }
+
+  function renderDiffSection(diff, engineId, headHash, baseHash) {
+    const files = diff.files || [];
+    const fileRows = files.length
+      ? files.map(file => `
+          <div class="file-row">
+            <div>
+              <div class="file-path mono">${escapeHtml(displayFile(file))}</div>
+              <div class="detail-subtitle">${escapeHtml(file.status)}</div>
+            </div>
+            <div class="mono">${file.additions ? `+${file.additions}` : '0'} / ${file.deletions ? `-${file.deletions}` : '0'}</div>
+          </div>
+        `).join('')
+      : '<div class="empty">No file-level changes found.</div>';
+
+    return `
+      <section class="detail-card">
+        <div class="detail-head">
+          <div>
+            <h3 class="detail-title">Diff</h3>
+            <div class="detail-subtitle">${escapeHtml(headHash.slice(0, 8))}${baseHash ? ` against ${escapeHtml(baseHash.slice(0, 8))}` : ' against parent'}</div>
+          </div>
+          <button class="button-inline" type="button" data-open-compare="${escapeHtmlAttr(engineId)}|${escapeHtmlAttr(baseHash)}|${escapeHtmlAttr(headHash)}" ${baseHash ? '' : 'disabled'}>Open compare</button>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-stat">
+            <div class="kv-label">Files</div>
+            <div class="kv-value mono">${Number(diff.files_changed || 0).toLocaleString()}</div>
+          </div>
+          <div class="summary-stat">
+            <div class="kv-label">Insertions</div>
+            <div class="kv-value mono positive">+${Number(diff.insertions || 0).toLocaleString()}</div>
+          </div>
+          <div class="summary-stat">
+            <div class="kv-label">Deletions</div>
+            <div class="kv-value mono negative">-${Number(diff.deletions || 0).toLocaleString()}</div>
+          </div>
+        </div>
+        <div class="file-list" style="margin-top:12px;">${fileRows}</div>
+        <div style="margin-top:12px;">
+          <div class="detail-head" style="margin-bottom:8px;">
+            <h3 class="detail-title">Patch</h3>
+            <div class="inline-note">${diff.patch_truncated ? 'truncated for display' : 'full patch for this view'}</div>
+          </div>
+          <pre class="code-block">${escapeHtml(diff.patch || 'No patch available.')}</pre>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRelatedJobs(jobs) {
+    if (!jobs || !jobs.length) {
+      return `
+        <section class="detail-card">
+          <div class="detail-head">
+            <h3 class="detail-title">Related jobs</h3>
+          </div>
+          <div class="empty">No tests reference this revision yet.</div>
+        </section>
+      `;
+    }
+
+    return `
+      <section class="detail-card">
+        <div class="detail-head">
+          <h3 class="detail-title">Related jobs</h3>
+        </div>
+        <div class="file-list">
+          ${jobs.map(job => `
+            <div class="file-row">
+              <div>
+                <div>${escapeHtml(job.engine_name)} • ${escapeHtml(job.job_type)} • <span class="badge badge-${job.status.toLowerCase()}">${escapeHtml(job.status)}</span></div>
+                <div class="detail-subtitle mono">
+                  dev ${escapeHtml(job.dev_commit_hash.slice(0, 8))} • base ${escapeHtml(job.base_commit_hash.slice(0, 8))}
+                </div>
+              </div>
+              <button class="button-inline" type="button" data-open-compare="${escapeHtmlAttr(job.engine_id)}|${escapeHtmlAttr(job.base_commit_hash)}|${escapeHtmlAttr(job.dev_commit_hash)}">Compare</button>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }
+
+  function bindDetailActions() {
+    document.querySelectorAll('#details-body [data-open-revision]').forEach(button => {
+      button.addEventListener('click', () => {
+        const [engineId, revisionRef] = button.dataset.openRevision.split('|');
+        openRevisionDetails(engineId, revisionRef);
+      });
+    });
+    document.querySelectorAll('#details-body [data-open-compare]').forEach(button => {
+      if (button.disabled) return;
+      button.addEventListener('click', () => {
+        const [engineId, baseRef, headRef] = button.dataset.openCompare.split('|');
+        openCompareDetails(engineId, baseRef, headRef);
+      });
+    });
   }
 
   async function handleAddEngine(event) {
@@ -1479,6 +1962,27 @@
     return `${Math.floor(diff / 86400)}d`;
   }
 
+  function formatAbsoluteTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString();
+  }
+
+  function formatActor(actor) {
+    if (!actor) return '-';
+    const parts = [];
+    if (actor.name) parts.push(actor.name);
+    if (actor.email) parts.push(`<${actor.email}>`);
+    return parts.join(' ') || '-';
+  }
+
+  function displayFile(file) {
+    if (file.status === 'renamed' && file.old_path && file.new_path) {
+      return `${file.old_path} -> ${file.new_path}`;
+    }
+    return file.new_path || file.old_path || '(unknown path)';
+  }
+
   function engineName(id) {
     return state.engines.find(engine => engine.id === id)?.name || id;
   }
@@ -1490,6 +1994,10 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function escapeHtmlAttr(value) {
+    return escapeHtml(value);
   }
 
   let resizeTimer;

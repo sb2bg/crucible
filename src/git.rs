@@ -4,7 +4,8 @@
 //! identifying tags/releases, and building engine binaries from source.
 
 use anyhow::{Context, Result};
-use git2::{BranchType, Repository, Sort};
+use git2::{BranchType, Delta, DiffFormat, Oid, Repository, Sort};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
@@ -12,9 +13,76 @@ use tracing::info;
 use crate::types::*;
 
 const DISPLAY_HASH_LEN: usize = 12;
+const MAX_PATCH_BYTES: usize = 24 * 1024;
 
 pub fn short_hash(hash: &str) -> &str {
     &hash[..DISPLAY_HASH_LEN.min(hash.len())]
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitActor {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiffFileSummary {
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiffSummary {
+    pub base_hash: Option<String>,
+    pub head_hash: String,
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    pub files: Vec<DiffFileSummary>,
+    pub patch: String,
+    pub patch_truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitDetails {
+    pub full_message: String,
+    pub body: Option<String>,
+    pub author: CommitActor,
+    pub committer: CommitActor,
+    pub author_time: chrono::DateTime<chrono::Utc>,
+    pub parent_hashes: Vec<String>,
+}
+
+fn actor_from_signature(signature: &git2::Signature<'_>) -> CommitActor {
+    CommitActor {
+        name: signature.name().map(str::to_string),
+        email: signature.email().map(str::to_string),
+    }
+}
+
+fn timestamp_to_utc(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .unwrap_or_default()
+        .with_timezone(&chrono::Utc)
+}
+
+fn delta_status(status: Delta) -> &'static str {
+    match status {
+        Delta::Unmodified => "unmodified",
+        Delta::Added => "added",
+        Delta::Deleted => "deleted",
+        Delta::Modified => "modified",
+        Delta::Renamed => "renamed",
+        Delta::Copied => "copied",
+        Delta::Ignored => "ignored",
+        Delta::Untracked => "untracked",
+        Delta::Typechange => "typechange",
+        Delta::Unreadable => "unreadable",
+        Delta::Conflicted => "conflicted",
+    }
 }
 
 /// Manages git operations for a single engine repository
@@ -129,6 +197,7 @@ impl GitManager {
                 tag,
                 is_release,
                 binary_path: None,
+                binary_fingerprint: None,
                 build_status: BuildStatus::Pending,
             };
             revisions.push(rev);
@@ -212,6 +281,13 @@ impl GitManager {
         Ok(dest)
     }
 
+    pub fn fingerprint_binary(path: &Path) -> Result<String> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("Failed to read built binary '{}'", path.display()))?;
+        let digest = Sha256::digest(bytes);
+        Ok(format!("{:x}", digest))
+    }
+
     /// Get the list of commits between two hashes (for bisect)
     pub fn commits_between(
         &self,
@@ -235,5 +311,126 @@ impl GitManager {
         );
 
         Ok(hashes)
+    }
+
+    pub fn commit_details(&self, repo: &Repository, commit_hash: &str) -> Result<CommitDetails> {
+        let oid = Oid::from_str(commit_hash)?;
+        let commit = repo.find_commit(oid)?;
+        let full_message = commit.message().unwrap_or("").trim_end().to_string();
+        let body = commit
+            .body()
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .map(str::to_string);
+        let author = actor_from_signature(&commit.author());
+        let committer = actor_from_signature(&commit.committer());
+
+        Ok(CommitDetails {
+            full_message,
+            body,
+            author,
+            committer,
+            author_time: timestamp_to_utc(commit.time().seconds()),
+            parent_hashes: commit.parent_ids().map(|oid| oid.to_string()).collect(),
+        })
+    }
+
+    pub fn diff_for_revision(&self, repo: &Repository, commit_hash: &str) -> Result<DiffSummary> {
+        let oid = Oid::from_str(commit_hash)?;
+        let commit = repo.find_commit(oid)?;
+        let base_hash = commit.parent_id(0).ok().map(|oid| oid.to_string());
+        self.diff_between_oids(repo, base_hash.as_deref(), Some(commit_hash))
+    }
+
+    pub fn diff_between(
+        &self,
+        repo: &Repository,
+        base_hash: &str,
+        head_hash: &str,
+    ) -> Result<DiffSummary> {
+        self.diff_between_oids(repo, Some(base_hash), Some(head_hash))
+    }
+
+    fn diff_between_oids(
+        &self,
+        repo: &Repository,
+        base_hash: Option<&str>,
+        head_hash: Option<&str>,
+    ) -> Result<DiffSummary> {
+        let base_tree = base_hash
+            .map(|hash| self.tree_for_commit(repo, hash))
+            .transpose()?;
+        let head_hash = head_hash.context("missing head revision")?;
+        let head_tree = self.tree_for_commit(repo, head_hash)?;
+
+        let diff = repo.diff_tree_to_tree(base_tree.as_ref(), Some(&head_tree), None)?;
+        let stats = diff.stats()?;
+
+        let mut files = Vec::new();
+        for index in 0..diff.deltas().len() {
+            let delta = diff
+                .get_delta(index)
+                .context("missing delta while building diff summary")?;
+            let (additions, deletions) = git2::Patch::from_diff(&diff, index)?
+                .and_then(|patch| patch.line_stats().ok())
+                .map(|(_, additions, deletions)| (additions, deletions))
+                .unwrap_or((0, 0));
+
+            files.push(DiffFileSummary {
+                old_path: delta
+                    .old_file()
+                    .path()
+                    .map(|path| path.display().to_string()),
+                new_path: delta
+                    .new_file()
+                    .path()
+                    .map(|path| path.display().to_string()),
+                status: delta_status(delta.status()).to_string(),
+                additions,
+                deletions,
+            });
+        }
+
+        let mut patch = String::new();
+        let mut patch_bytes = 0usize;
+        let mut patch_truncated = false;
+        diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+            if patch_truncated {
+                return true;
+            }
+            let content = String::from_utf8_lossy(line.content());
+            let content_bytes = content.len();
+            if patch_bytes + content_bytes > MAX_PATCH_BYTES {
+                patch_truncated = true;
+                return true;
+            }
+            patch.push_str(&content);
+            patch_bytes += content_bytes;
+            true
+        })?;
+        if patch_truncated {
+            patch.push_str("\n... diff truncated ...\n");
+        }
+
+        Ok(DiffSummary {
+            base_hash: base_hash.map(str::to_string),
+            head_hash: head_hash.to_string(),
+            files_changed: stats.files_changed(),
+            insertions: stats.insertions(),
+            deletions: stats.deletions(),
+            files,
+            patch,
+            patch_truncated,
+        })
+    }
+
+    fn tree_for_commit<'repo>(
+        &self,
+        repo: &'repo Repository,
+        commit_hash: &str,
+    ) -> Result<git2::Tree<'repo>> {
+        let oid = Oid::from_str(commit_hash)?;
+        let commit = repo.find_commit(oid)?;
+        Ok(commit.tree()?)
     }
 }

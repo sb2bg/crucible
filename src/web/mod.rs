@@ -1,23 +1,26 @@
 //! Web server for the Crucible dashboard and admin surface.
 
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query, State},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use tracing::warn;
 
 use crate::bisect::{BisectRunner, BisectStep};
 use crate::config::Config;
-use crate::git::{short_hash, GitManager};
+use crate::git::{short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
-use crate::types::{Engine, TestStatus, TimeControl};
+use crate::types::{Engine, EngineRevision, JobSummary, TestStatus, TimeControl};
 
 pub struct WebState {
     pub storage: Storage,
@@ -29,23 +32,29 @@ pub fn create_router(storage: Storage, config: Config) -> Router {
 
     Router::new()
         .route("/", get(index_handler))
+        .route("/favicon.svg", get(favicon_handler))
         .route("/api/status", get(status_handler))
         .route("/api/engines", get(engines_handler))
-        .route("/api/timeline/{engine_id}", get(timeline_handler))
+        .route("/api/timeline/:engine_id", get(timeline_handler))
         .route("/api/jobs", get(jobs_handler))
         .route("/api/bisect", get(active_bisect_sessions_handler))
+        .route(
+            "/api/revisions/:engine_id/:revision_ref",
+            get(revision_details_handler),
+        )
+        .route("/api/compare/:engine_id", get(compare_handler))
         .route("/api/admin/engines", post(add_engine_handler))
         .route(
-            "/api/admin/engines/{engine_id}",
+            "/api/admin/engines/:engine_id",
             delete(delete_engine_handler),
         )
         .route("/api/admin/tests", post(queue_manual_test_handler))
         .route("/api/admin/bisect", post(start_bisect_handler))
         .route(
-            "/api/admin/bisect/{session_id}/cancel",
+            "/api/admin/bisect/:session_id/cancel",
             post(cancel_bisect_session_handler),
         )
-        .route("/api/admin/jobs/{job_id}/cancel", post(cancel_job_handler))
+        .route("/api/admin/jobs/:job_id/cancel", post(cancel_job_handler))
         .with_state(state)
 }
 
@@ -73,8 +82,44 @@ struct StartBisectRequest {
     bad: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CompareQuery {
+    base: String,
+    head: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RevisionDetailsResponse {
+    engine_id: String,
+    engine_name: String,
+    revision: EngineRevision,
+    commit: CommitDetails,
+    compare_to_parent: DiffSummary,
+    related_jobs: Vec<JobSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct CompareResponse {
+    engine_id: String,
+    engine_name: String,
+    base_revision: EngineRevision,
+    head_revision: EngineRevision,
+    summary: DiffSummary,
+    related_jobs: Vec<JobSummary>,
+}
+
 async fn index_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            (CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_SVG,
+    )
 }
 
 async fn status_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -112,6 +157,27 @@ async fn active_bisect_sessions_handler(State(state): State<Arc<WebState>>) -> i
     match state.storage.get_running_bisect_sessions() {
         Ok(sessions) => Json(serde_json::to_value(sessions).unwrap()).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    }
+}
+
+async fn revision_details_handler(
+    State(state): State<Arc<WebState>>,
+    Path((engine_id, revision_ref)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match load_revision_details(&state, &engine_id, &revision_ref) {
+        Ok(payload) => Json(serde_json::to_value(payload).unwrap()).into_response(),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, err),
+    }
+}
+
+async fn compare_handler(
+    State(state): State<Arc<WebState>>,
+    Path(engine_id): Path<String>,
+    Query(query): Query<CompareQuery>,
+) -> impl IntoResponse {
+    match load_compare_details(&state, &engine_id, &query.base, &query.head) {
+        Ok(payload) => Json(serde_json::to_value(payload).unwrap()).into_response(),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, err),
     }
 }
 
@@ -407,6 +473,83 @@ fn start_bisect(
     Ok(response)
 }
 
+fn load_revision_details(
+    state: &WebState,
+    engine_id: &str,
+    revision_ref: &str,
+) -> anyhow::Result<RevisionDetailsResponse> {
+    let engine = state
+        .storage
+        .get_engine_by_id(engine_id)?
+        .ok_or_else(|| anyhow::anyhow!("engine not found"))?;
+    let revision = state
+        .storage
+        .get_revision_by_ref_prefix(&engine.id, revision_ref)?
+        .ok_or_else(|| anyhow::anyhow!("could not resolve revision"))?;
+    let git_mgr = GitManager::new(
+        &engine.repo_url,
+        &engine.local_path,
+        &engine.build_cmd,
+        &engine.binary_path,
+    );
+    let repo = git_mgr.ensure_repo()?;
+    let commit = git_mgr.commit_details(&repo, &revision.commit_hash)?;
+    let compare_to_parent = git_mgr.diff_for_revision(&repo, &revision.commit_hash)?;
+    let related_jobs = state.storage.list_jobs_for_revision(&revision.id, 8)?;
+
+    Ok(RevisionDetailsResponse {
+        engine_id: engine.id,
+        engine_name: engine.name,
+        revision,
+        commit,
+        compare_to_parent,
+        related_jobs,
+    })
+}
+
+fn load_compare_details(
+    state: &WebState,
+    engine_id: &str,
+    base_ref: &str,
+    head_ref: &str,
+) -> anyhow::Result<CompareResponse> {
+    let engine = state
+        .storage
+        .get_engine_by_id(engine_id)?
+        .ok_or_else(|| anyhow::anyhow!("engine not found"))?;
+    let base_revision = state
+        .storage
+        .get_revision_by_ref_prefix(&engine.id, base_ref.trim())?
+        .ok_or_else(|| anyhow::anyhow!("could not resolve base revision"))?;
+    let head_revision = state
+        .storage
+        .get_revision_by_ref_prefix(&engine.id, head_ref.trim())?
+        .ok_or_else(|| anyhow::anyhow!("could not resolve head revision"))?;
+
+    let git_mgr = GitManager::new(
+        &engine.repo_url,
+        &engine.local_path,
+        &engine.build_cmd,
+        &engine.binary_path,
+    );
+    let repo = git_mgr.ensure_repo()?;
+    let summary = git_mgr.diff_between(
+        &repo,
+        &base_revision.commit_hash,
+        &head_revision.commit_hash,
+    )?;
+    let related_jobs = state.storage.list_jobs_for_revision(&head_revision.id, 8)?;
+
+    Ok(CompareResponse {
+        engine_id: engine.id,
+        engine_name: engine.name,
+        base_revision,
+        head_revision,
+        summary,
+        related_jobs,
+    })
+}
+
 fn sync_engine_revisions(
     state: &WebState,
     engine: &Engine,
@@ -428,10 +571,12 @@ fn sync_engine_revisions(
     {
         match git_mgr.build_revision(repo, &revision.commit_hash) {
             Ok(binary) => {
+                let fingerprint = GitManager::fingerprint_binary(&binary)?;
                 state.storage.update_build_status(
                     &revision.id,
                     crate::types::BuildStatus::Success,
                     Some(&binary),
+                    Some(&fingerprint),
                 )?;
             }
             Err(err) => {
@@ -443,6 +588,7 @@ fn sync_engine_revisions(
                 state.storage.update_build_status(
                     &revision.id,
                     crate::types::BuildStatus::Failed,
+                    None,
                     None,
                 )?;
             }
@@ -515,3 +661,27 @@ fn authorize_admin(headers: &HeaderMap, state: &WebState) -> Result<(), Response
 
 /// The dashboard as a single embedded HTML page.
 const DASHBOARD_HTML: &str = include_str!("../../templates/dashboard.html");
+const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#17212d"/>
+      <stop offset="100%" stop-color="#090e14"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd782"/>
+      <stop offset="55%" stop-color="#ff9a3d"/>
+      <stop offset="100%" stop-color="#e4572e"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path
+    d="M45.5 18.8c-3.2-3.4-7.9-5.3-13.1-5.3-9.8 0-17.9 7.5-17.9 18.4 0 10.7 7.7 18.6 18.4 18.6 5.1 0 9.6-1.8 12.7-5.2l-6.1-6.3c-1.8 1.8-4 2.8-6.5 2.8-5.8 0-9.1-4.3-9.1-9.9 0-5.9 3.7-9.8 9-9.8 2.5 0 4.8 1 6.7 3z"
+    fill="url(#ember)"
+  />
+  <path
+    d="M18 18.5h26.5l-3.2 5.4H21.2z"
+    fill="#fff2cf"
+    opacity=".82"
+  />
+</svg>
+"##;

@@ -80,6 +80,7 @@ impl Storage {
                 tag TEXT,
                 is_release INTEGER NOT NULL DEFAULT 0,
                 binary_path TEXT,
+                binary_fingerprint TEXT,
                 build_status TEXT NOT NULL DEFAULT 'Pending',
                 UNIQUE(engine_id, commit_hash)
             );
@@ -159,6 +160,7 @@ impl Storage {
         self.ensure_bisect_column(&tx, "probe_history", "TEXT NOT NULL DEFAULT '[]'")?;
         self.ensure_bisect_column(&tx, "candidate_revision_id", "TEXT")?;
         self.ensure_bisect_column(&tx, "candidate_index", "INTEGER")?;
+        self.ensure_revision_column(&tx, "binary_fingerprint", "TEXT")?;
         tx.execute_batch(
             "
             INSERT OR IGNORE INTO revision_branches (revision_id, branch)
@@ -205,6 +207,28 @@ impl Storage {
             conn.execute(
                 &format!(
                     "ALTER TABLE bisect_sessions ADD COLUMN {} {}",
+                    column_name, column_sql
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_revision_column(
+        &self,
+        conn: &Connection,
+        column_name: &str,
+        column_sql: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(revisions)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == column_name) {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE revisions ADD COLUMN {} {}",
                     column_name, column_sql
                 ),
                 [],
@@ -316,8 +340,8 @@ impl Storage {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT OR IGNORE INTO revisions (id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO revisions (id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, binary_fingerprint, build_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 rev.id,
                 rev.engine_id,
@@ -328,6 +352,7 @@ impl Storage {
                 rev.tag,
                 rev.is_release as i32,
                 rev.binary_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                rev.binary_fingerprint,
                 encode_build_status(rev.build_status),
             ],
         )?;
@@ -342,13 +367,13 @@ impl Storage {
     pub fn get_revisions_for_engine(&self, engine_id: &str) -> Result<Vec<EngineRevision>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, binary_fingerprint, build_status
              FROM revisions WHERE engine_id = ?1 ORDER BY commit_date ASC",
         )?;
         let revs = stmt
             .query_map(params![engine_id], |row| {
                 let date_str: String = row.get(4)?;
-                let status_str: String = row.get(9)?;
+                let status_str: String = row.get(10)?;
                 let binary_str: Option<String> = row.get(8)?;
                 Ok(EngineRevision {
                     id: row.get(0)?,
@@ -360,6 +385,7 @@ impl Storage {
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
+                    binary_fingerprint: row.get(9)?,
                     build_status: decode_build_status(&status_str)?,
                 })
             })?
@@ -370,7 +396,7 @@ impl Storage {
     pub fn get_branch_revisions_for_engine(&self, engine_id: &str) -> Result<Vec<EngineRevision>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.engine_id, r.commit_hash, r.commit_message, r.commit_date, rb.branch, r.tag, r.is_release, r.binary_path, r.build_status
+            "SELECT r.id, r.engine_id, r.commit_hash, r.commit_message, r.commit_date, rb.branch, r.tag, r.is_release, r.binary_path, r.binary_fingerprint, r.build_status
              FROM revisions r
              JOIN revision_branches rb ON rb.revision_id = r.id
              WHERE r.engine_id = ?1
@@ -385,14 +411,14 @@ impl Storage {
     pub fn get_revision_by_id(&self, revision_id: &str) -> Result<Option<EngineRevision>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, binary_fingerprint, build_status
              FROM revisions WHERE id = ?1 LIMIT 1",
         )?;
 
         let revision = stmt
             .query_row(params![revision_id], |row| {
                 let date_str: String = row.get(4)?;
-                let status_str: String = row.get(9)?;
+                let status_str: String = row.get(10)?;
                 let binary_str: Option<String> = row.get(8)?;
                 Ok(EngineRevision {
                     id: row.get(0)?,
@@ -404,6 +430,7 @@ impl Storage {
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
+                    binary_fingerprint: row.get(9)?,
                     build_status: decode_build_status(&status_str)?,
                 })
             })
@@ -420,7 +447,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let like = format!("{}%", hash_prefix);
         let mut stmt = conn.prepare(
-            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, binary_fingerprint, build_status
              FROM revisions
              WHERE engine_id = ?1 AND commit_hash LIKE ?2
              ORDER BY commit_date ASC
@@ -430,7 +457,7 @@ impl Storage {
         let revisions = stmt
             .query_map(params![engine_id, like], |row| {
                 let date_str: String = row.get(4)?;
-                let status_str: String = row.get(9)?;
+                let status_str: String = row.get(10)?;
                 let binary_str: Option<String> = row.get(8)?;
                 Ok(EngineRevision {
                     id: row.get(0)?,
@@ -442,6 +469,7 @@ impl Storage {
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
+                    binary_fingerprint: row.get(9)?,
                     build_status: decode_build_status(&status_str)?,
                 })
             })?
@@ -466,7 +494,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let like = format!("{}%", revision_ref);
         let mut stmt = conn.prepare(
-            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, build_status
+            "SELECT id, engine_id, commit_hash, commit_message, commit_date, branch, tag, is_release, binary_path, binary_fingerprint, build_status
              FROM revisions
              WHERE engine_id = ?1 AND tag IS NOT NULL AND tag LIKE ?2
              ORDER BY commit_date ASC
@@ -476,7 +504,7 @@ impl Storage {
         let revisions = stmt
             .query_map(params![engine_id, like], |row| {
                 let date_str: String = row.get(4)?;
-                let status_str: String = row.get(9)?;
+                let status_str: String = row.get(10)?;
                 let binary_str: Option<String> = row.get(8)?;
                 Ok(EngineRevision {
                     id: row.get(0)?,
@@ -488,6 +516,7 @@ impl Storage {
                     tag: row.get(6)?,
                     is_release: row.get::<_, i32>(7)? != 0,
                     binary_path: binary_str.map(std::path::PathBuf::from),
+                    binary_fingerprint: row.get(9)?,
                     build_status: decode_build_status(&status_str)?,
                 })
             })?
@@ -505,13 +534,15 @@ impl Storage {
         revision_id: &str,
         status: BuildStatus,
         binary_path: Option<&Path>,
+        binary_fingerprint: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE revisions SET build_status = ?1, binary_path = ?2 WHERE id = ?3",
+            "UPDATE revisions SET build_status = ?1, binary_path = ?2, binary_fingerprint = ?3 WHERE id = ?4",
             params![
                 encode_build_status(status),
                 binary_path.map(|p| p.to_string_lossy().to_string()),
+                binary_fingerprint,
                 revision_id,
             ],
         )?;
@@ -787,6 +818,79 @@ impl Storage {
 
         let jobs = stmt
             .query_map(params![limit as i64], |row| {
+                let status_str: String = row.get(7)?;
+                let job_type_str: String = row.get(9)?;
+                let created_at: String = row.get(10)?;
+                let started_at: Option<String> = row.get(11)?;
+                let completed_at: Option<String> = row.get(12)?;
+                let sprt_result: Option<String> = row.get(19)?;
+                Ok(JobSummary {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    engine_name: row.get(2)?,
+                    dev_revision_id: row.get(3)?,
+                    dev_commit_hash: row.get(4)?,
+                    base_revision_id: row.get(5)?,
+                    base_commit_hash: row.get(6)?,
+                    status: decode_test_status(&status_str)?,
+                    priority: row.get(8)?,
+                    job_type: decode_job_type(&job_type_str)?,
+                    created_at: parse_timestamp_column(&created_at, 10)?,
+                    started_at: parse_optional_timestamp_column(started_at, 11)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
+                    wins: row.get(13)?,
+                    losses: row.get(14)?,
+                    draws: row.get(15)?,
+                    elo_diff: row.get(16)?,
+                    elo_error: row.get(17)?,
+                    los: row.get(18)?,
+                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
+    pub fn list_jobs_for_revision(
+        &self,
+        revision_id: &str,
+        limit: usize,
+    ) -> Result<Vec<JobSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT
+                j.id,
+                j.engine_id,
+                e.name,
+                j.dev_revision_id,
+                dev.commit_hash,
+                j.base_revision_id,
+                base.commit_hash,
+                j.status,
+                j.priority,
+                j.job_type,
+                j.created_at,
+                j.started_at,
+                j.completed_at,
+                j.wins,
+                j.losses,
+                j.draws,
+                j.elo_diff,
+                j.elo_error,
+                j.los,
+                j.sprt_result
+             FROM test_jobs j
+             JOIN engines e ON e.id = j.engine_id
+             JOIN revisions dev ON dev.id = j.dev_revision_id
+             JOIN revisions base ON base.id = j.base_revision_id
+             WHERE j.dev_revision_id = ?1 OR j.base_revision_id = ?1
+             ORDER BY j.created_at DESC
+             LIMIT ?2",
+        )?;
+
+        let jobs = stmt
+            .query_map(params![revision_id, limit as i64], |row| {
                 let status_str: String = row.get(7)?;
                 let job_type_str: String = row.get(9)?;
                 let created_at: String = row.get(10)?;
@@ -1197,7 +1301,7 @@ fn map_test_job_row(row: &Row<'_>) -> rusqlite::Result<TestJob> {
 
 fn map_revision_row(row: &Row<'_>) -> rusqlite::Result<EngineRevision> {
     let date_str: String = row.get(4)?;
-    let status_str: String = row.get(9)?;
+    let status_str: String = row.get(10)?;
     let binary_str: Option<String> = row.get(8)?;
     Ok(EngineRevision {
         id: row.get(0)?,
@@ -1209,6 +1313,7 @@ fn map_revision_row(row: &Row<'_>) -> rusqlite::Result<EngineRevision> {
         tag: row.get(6)?,
         is_release: row.get::<_, i32>(7)? != 0,
         binary_path: binary_str.map(std::path::PathBuf::from),
+        binary_fingerprint: row.get(9)?,
         build_status: decode_build_status(&status_str)?,
     })
 }
@@ -1408,6 +1513,7 @@ mod tests {
             tag: None,
             is_release: false,
             binary_path: Some(std::path::PathBuf::from(format!("/tmp/{}", id))),
+            binary_fingerprint: None,
             build_status: BuildStatus::Success,
         }
     }
@@ -1656,6 +1762,37 @@ mod tests {
             .get_revision_by_ref_prefix(&engine.id, "v1.2")?
             .expect("tagged revision should resolve");
         assert_eq!(resolved.id, rev.id);
+        Ok(())
+    }
+
+    #[test]
+    fn lists_jobs_for_revision_when_revision_is_dev_or_base() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        let base = test_revision(&engine.id, "rev-base", "aaaa");
+        let dev = test_revision(&engine.id, "rev-dev", "bbbb");
+        let newer = test_revision(&engine.id, "rev-newer", "cccc");
+
+        let mut job_one = test_job(&engine.id, &dev.id, &base.id);
+        job_one.id = "job-1".into();
+        job_one.created_at = Utc::now() - chrono::Duration::minutes(5);
+
+        let mut job_two = test_job(&engine.id, &newer.id, &dev.id);
+        job_two.id = "job-2".into();
+        job_two.job_type = JobType::Manual;
+        job_two.created_at = Utc::now();
+
+        storage.insert_engine(&engine)?;
+        storage.insert_revision(&base)?;
+        storage.insert_revision(&dev)?;
+        storage.insert_revision(&newer)?;
+        storage.insert_test_job(&job_one)?;
+        storage.insert_test_job(&job_two)?;
+
+        let jobs = storage.list_jobs_for_revision(&dev.id, 10)?;
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, job_two.id);
+        assert_eq!(jobs[1].id, job_one.id);
         Ok(())
     }
 }

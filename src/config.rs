@@ -179,6 +179,8 @@ pub struct SprtConfig {
     pub alpha: f64,
     #[serde(default = "default_beta")]
     pub beta: f64,
+    #[serde(default = "default_sprt_min_games")]
+    pub min_games: u32,
 }
 
 fn default_elo0() -> f64 {
@@ -193,6 +195,9 @@ fn default_alpha() -> f64 {
 fn default_beta() -> f64 {
     0.05
 }
+fn default_sprt_min_games() -> u32 {
+    16
+}
 
 impl Default for SprtConfig {
     fn default() -> Self {
@@ -201,6 +206,7 @@ impl Default for SprtConfig {
             elo1: default_elo1(),
             alpha: default_alpha(),
             beta: default_beta(),
+            min_games: default_sprt_min_games(),
         }
     }
 }
@@ -308,6 +314,9 @@ impl Config {
         }
         if !(0.0 < self.testing.sprt.beta && self.testing.sprt.beta < 1.0) {
             anyhow::bail!("testing.sprt.beta must be between 0 and 1");
+        }
+        if self.testing.sprt.min_games == 0 {
+            anyhow::bail!("testing.sprt.min_games must be at least 1");
         }
         if self
             .server

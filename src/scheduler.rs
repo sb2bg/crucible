@@ -66,6 +66,12 @@ impl Scheduler {
                     continue;
                 }
 
+                if dev.binary_fingerprint.is_some()
+                    && dev.binary_fingerprint == base.binary_fingerprint
+                {
+                    continue;
+                }
+
                 if self
                     .storage
                     .has_test_job(engine_id, &dev.id, &base.id, JobType::Sequential)?
@@ -206,6 +212,7 @@ mod tests {
             tag: None,
             is_release: false,
             binary_path: Some(std::path::PathBuf::from(format!("/tmp/{}", suffix))),
+            binary_fingerprint: None,
             build_status: BuildStatus::Success,
         }
     }
@@ -301,6 +308,27 @@ mod tests {
         assert!(jobs.iter().any(
             |job| job.dev_revision_id == dev_head.id && job.base_revision_id == shared_main.id
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn skips_sequential_jobs_for_identical_binaries() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        storage.insert_engine(&engine)?;
+
+        let mut base = test_revision(&engine.id, "main", "a1", 0);
+        let mut dev = test_revision(&engine.id, "main", "a2", 1);
+        base.binary_fingerprint = Some("same-binary".into());
+        dev.binary_fingerprint = Some("same-binary".into());
+
+        storage.insert_revision(&base)?;
+        storage.insert_revision(&dev)?;
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert!(jobs.is_empty());
         Ok(())
     }
 }

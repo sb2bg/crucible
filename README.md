@@ -117,6 +117,7 @@ elo0 = 0.0                 # H0: no improvement
 elo1 = 5.0                 # H1: 5 Elo improvement
 alpha = 0.05               # False positive rate
 beta = 0.05                # False negative rate
+min_games = 16             # don't let SPRT conclude on tiny samples
 
 [[engines]]
 name = "my-engine"

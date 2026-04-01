@@ -31,6 +31,7 @@ pub struct EngineRevision {
     pub tag: Option<String>,
     pub is_release: bool,
     pub binary_path: Option<PathBuf>,
+    pub binary_fingerprint: Option<String>,
     pub build_status: BuildStatus,
 }
 

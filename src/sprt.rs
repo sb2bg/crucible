@@ -19,6 +19,8 @@ pub struct SprtBounds {
     pub alpha: f64,
     /// Type II error rate (false negative)
     pub beta: f64,
+    /// Minimum number of games required before allowing a decision
+    pub min_games: u32,
 }
 
 impl Default for SprtBounds {
@@ -28,6 +30,7 @@ impl Default for SprtBounds {
             elo1: 5.0,
             alpha: 0.05,
             beta: 0.05,
+            min_games: 16,
         }
     }
 }
@@ -40,6 +43,7 @@ impl SprtBounds {
             elo1: 0.0,
             alpha: 0.05,
             beta: 0.05,
+            min_games: 16,
         }
     }
 
@@ -55,6 +59,7 @@ impl SprtBounds {
             elo1: 10.0,
             alpha: 0.05,
             beta: 0.05,
+            min_games: 16,
         }
     }
 
@@ -74,6 +79,9 @@ impl SprtBounds {
         }
         if self.elo0 >= self.elo1 {
             bail!("SPRT elo0 must be less than elo1");
+        }
+        if self.min_games == 0 {
+            bail!("SPRT min_games must be at least 1");
         }
         Ok(())
     }
@@ -147,7 +155,7 @@ pub fn sprt_test(wins: u32, draws: u32, losses: u32, bounds: &SprtBounds) -> Spr
         return SprtResult::Inconclusive;
     }
     let total = wins + draws + losses;
-    if total < 4 {
+    if total < bounds.min_games {
         return SprtResult::Inconclusive;
     }
 
@@ -260,8 +268,16 @@ mod tests {
             elo1: 0.0,
             alpha: 1.5,
             beta: 0.05,
+            min_games: 16,
         };
         assert!(bounds.validate().is_err());
         assert_eq!(sprt_test(100, 100, 100, &bounds), SprtResult::Inconclusive);
+    }
+
+    #[test]
+    fn test_perfect_short_run_stays_inconclusive_before_min_games() {
+        let bounds = SprtBounds::default();
+        let result = sprt_test(4, 0, 0, &bounds);
+        assert_eq!(result, SprtResult::Inconclusive);
     }
 }

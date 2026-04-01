@@ -705,6 +705,7 @@ fn configured_sprt_bounds(config: &Config, job_type: JobType) -> SprtBounds {
             elo1: config.testing.sprt.elo1,
             alpha: config.testing.sprt.alpha,
             beta: config.testing.sprt.beta,
+            min_games: config.testing.sprt.min_games,
         },
     }
 }
@@ -736,7 +737,13 @@ fn sync_engine_revisions(
     {
         match git_mgr.build_revision(repo, &revision.commit_hash) {
             Ok(binary) => {
-                storage.update_build_status(&revision.id, BuildStatus::Success, Some(&binary))?;
+                let fingerprint = GitManager::fingerprint_binary(&binary)?;
+                storage.update_build_status(
+                    &revision.id,
+                    BuildStatus::Success,
+                    Some(&binary),
+                    Some(&fingerprint),
+                )?;
             }
             Err(err) => {
                 warn!(
@@ -744,7 +751,7 @@ fn sync_engine_revisions(
                     short_hash(&revision.commit_hash),
                     err
                 );
-                storage.update_build_status(&revision.id, BuildStatus::Failed, None)?;
+                storage.update_build_status(&revision.id, BuildStatus::Failed, None, None)?;
             }
         }
     }

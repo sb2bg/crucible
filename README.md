@@ -118,6 +118,7 @@ start_from = "v1.0.0"
 ```
 
 Entries under `[[engines]]` are imported automatically when `crucible run` starts.
+For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
 
 ## CI/CD
 

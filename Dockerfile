@@ -20,11 +20,27 @@ RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 FROM debian:bookworm-slim
 
+ARG ZIG_VERSION=0.15.2
+
 RUN apt-get update && apt-get install -y \
+    curl \
     git \
     libssl3 \
     ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) zig_arch="x86_64" ;; \
+      arm64) zig_arch="aarch64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz; \
+    tar -xf /tmp/zig.tar.xz -C /opt; \
+    ln -s "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig; \
+    rm /tmp/zig.tar.xz
 
 RUN useradd --create-home --uid 10001 crucible
 

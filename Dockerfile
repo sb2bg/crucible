@@ -31,6 +31,7 @@ RUN useradd --create-home --uid 10001 crucible
 COPY --from=builder /app/target/release/crucible /usr/local/bin/crucible
 
 WORKDIR /work
+RUN mkdir -p /work/.crucible && chown -R crucible:crucible /work /home/crucible
 USER crucible
 EXPOSE 8877
 

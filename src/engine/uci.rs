@@ -323,8 +323,7 @@ fn should_replace_info(current: Option<&SearchInfo>, candidate: &SearchInfo) -> 
         Some(current) => {
             candidate.depth > current.depth
                 || (candidate.depth == current.depth
-                    && candidate.score.is_some()
-                    && current.score.is_none())
+                    && (candidate.score.is_some() || current.score.is_none()))
         }
     }
 }
@@ -365,5 +364,21 @@ mod tests {
         assert_eq!(info.depth, 9);
         assert_eq!(info.score, Some(SearchScore::Mate(-3)));
         assert!(info.pv.is_empty());
+    }
+
+    #[test]
+    fn keeps_latest_scored_info_at_same_depth() {
+        let current = SearchInfo {
+            depth: 12,
+            score: Some(SearchScore::Cp(18)),
+            pv: vec!["e2e4".into()],
+        };
+        let candidate = SearchInfo {
+            depth: 12,
+            score: Some(SearchScore::Cp(34)),
+            pv: vec!["d2d4".into()],
+        };
+
+        assert!(super::should_replace_info(Some(&current), &candidate));
     }
 }

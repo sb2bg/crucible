@@ -7,6 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 use crate::engine::uci::{SearchScore, UciEngine};
 use crate::types::{GameResult, TimeControl};
@@ -139,7 +140,11 @@ fn prepare_run_dir(base: &Path, engine_name: &str, revision_hash: &str) -> Resul
     let run_dir = base
         .join(sanitize_path_component(engine_name))
         .join(revision_hash)
-        .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
+        .join(format!(
+            "{}-{}",
+            Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
+            Uuid::new_v4()
+        ));
     fs::create_dir_all(&run_dir)?;
     Ok(run_dir)
 }
@@ -437,5 +442,16 @@ mod tests {
     fn sanitizes_engine_name_for_output_paths() {
         assert_eq!(sanitize_path_component("Stockfish Dev"), "Stockfish-Dev");
         assert_eq!(sanitize_path_component("lc0+cuda"), "lc0-cuda");
+    }
+
+    #[test]
+    fn prepares_unique_run_dirs() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("crucible-training-test-{}", Uuid::new_v4()));
+        let first = prepare_run_dir(&base, "Sykora", "abcd")?;
+        let second = prepare_run_dir(&base, "Sykora", "abcd")?;
+
+        assert_ne!(first, second);
+        fs::remove_dir_all(base)?;
+        Ok(())
     }
 }

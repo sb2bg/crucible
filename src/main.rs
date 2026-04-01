@@ -619,7 +619,7 @@ fn resolve_selfplay_revision(
 ) -> Result<crucible::types::EngineRevision> {
     if let Some(revision) = revision {
         return storage
-            .get_revision_by_hash_prefix(&engine.id, revision)?
+            .get_revision_by_ref_prefix(&engine.id, revision)?
             .with_context(|| format!("Could not resolve revision '{}'", revision));
     }
 

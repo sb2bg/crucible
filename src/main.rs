@@ -15,6 +15,7 @@ use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
 use crucible::sprt::{elo_error, los, wdl_to_elo};
 use crucible::storage::Storage;
+use crucible::training::{run_selfplay_data_generation, SelfPlayDataConfig};
 use crucible::types::{
     BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
     TimeControl,
@@ -106,6 +107,22 @@ enum Commands {
         /// Base commit hash
         #[arg(long)]
         base: String,
+    },
+
+    /// Generate self-play data for NNUE-style training
+    SelfplayData {
+        /// Engine name
+        #[arg(short, long)]
+        engine: String,
+        /// Revision hash/tag prefix (default: latest successfully built revision)
+        #[arg(long)]
+        revision: Option<String>,
+        /// Number of self-play games
+        #[arg(long)]
+        games: Option<u32>,
+        /// Override training output directory
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
     },
 
     /// Show test results and Elo timeline
@@ -386,6 +403,59 @@ async fn main() -> Result<()> {
             println!("Job id: {}", job.id);
         }
 
+        Commands::SelfplayData {
+            engine,
+            revision,
+            games,
+            output_dir,
+        } => {
+            let storage = open_storage(&config)?;
+            let engine = storage
+                .get_engine_by_name(&engine)?
+                .with_context(|| format!("Engine '{}' is not tracked", engine))?;
+            let git_mgr = GitManager::new(
+                &engine.repo_url,
+                &engine.local_path,
+                &engine.build_cmd,
+                &engine.binary_path,
+            );
+            let repo = git_mgr.ensure_repo()?;
+            sync_engine_revisions(&storage, &engine, &git_mgr, &repo)?;
+
+            let revision = resolve_selfplay_revision(&storage, &engine, revision.as_deref())?;
+            let binary_path = revision.binary_path.clone().with_context(|| {
+                format!(
+                    "Revision '{}' does not have a built binary",
+                    revision.commit_hash
+                )
+            })?;
+            let summary = run_selfplay_data_generation(SelfPlayDataConfig {
+                engine_id: engine.id.clone(),
+                engine_name: engine.name.clone(),
+                revision_id: revision.id.clone(),
+                revision_hash: revision.commit_hash.clone(),
+                binary_path,
+                time_control: configured_time_control(&config),
+                opening_book: load_opening_book(config.testing.opening_book.as_deref())?,
+                games: games.unwrap_or(config.training.selfplay_games),
+                hash_mb: config.testing.hash_mb,
+                threads: config.testing.engine_threads,
+                output_dir: output_dir.unwrap_or_else(|| config.training.output_dir.clone()),
+            })?;
+
+            println!("Generated self-play data for '{}'", engine.name);
+            println!("  Revision: {}", short_hash(&revision.commit_hash));
+            println!("  Games:    {}", summary.games_played);
+            println!("  Samples:  {}", summary.samples_written);
+            println!("  Output:   {}", summary.run_dir.display());
+            if !summary.depth_counts.is_empty() {
+                println!("  Depth buckets:");
+                for (depth, count) in summary.depth_counts {
+                    println!("    d{:>3}: {}", depth, count);
+                }
+            }
+        }
+
         Commands::Status { engine: _ } => {
             let storage = open_storage(&config)?;
             let status = storage.get_system_status()?;
@@ -540,6 +610,30 @@ fn sync_config_engines(storage: &Storage, config: &Config) -> Result<()> {
         storage.insert_engine(&engine)?;
     }
     Ok(())
+}
+
+fn resolve_selfplay_revision(
+    storage: &Storage,
+    engine: &Engine,
+    revision: Option<&str>,
+) -> Result<crucible::types::EngineRevision> {
+    if let Some(revision) = revision {
+        return storage
+            .get_revision_by_hash_prefix(&engine.id, revision)?
+            .with_context(|| format!("Could not resolve revision '{}'", revision));
+    }
+
+    storage
+        .get_revisions_for_engine(&engine.id)?
+        .into_iter()
+        .rev()
+        .find(|revision| revision.build_status == BuildStatus::Success)
+        .with_context(|| {
+            format!(
+                "Engine '{}' has no successfully built revisions",
+                engine.name
+            )
+        })
 }
 
 async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {

@@ -13,6 +13,25 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScore {
+    Cp(i32),
+    Mate(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchInfo {
+    pub depth: u32,
+    pub score: Option<SearchScore>,
+    pub pv: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOutcome {
+    pub bestmove: Option<String>,
+    pub info: Option<SearchInfo>,
+}
+
 /// A running UCI engine process
 pub struct UciEngine {
     name: String,
@@ -126,7 +145,7 @@ impl UciEngine {
         binc: u64,
         timeout: Duration,
         cancel_flag: Option<&AtomicBool>,
-    ) -> Result<Option<String>> {
+    ) -> Result<SearchOutcome> {
         let moves_str = if moves.is_empty() {
             String::new()
         } else {
@@ -149,7 +168,7 @@ impl UciEngine {
         moves: &[String],
         nodes: u64,
         cancel_flag: Option<&AtomicBool>,
-    ) -> Result<Option<String>> {
+    ) -> Result<SearchOutcome> {
         let moves_str = if moves.is_empty() {
             String::new()
         } else {
@@ -196,15 +215,19 @@ impl UciEngine {
         &mut self,
         timeout: Duration,
         cancel_flag: Option<&AtomicBool>,
-    ) -> Result<Option<String>> {
+    ) -> Result<SearchOutcome> {
         let start = Instant::now();
+        let mut best_info: Option<SearchInfo> = None;
         loop {
             if cancel_flag.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 let _ = self.send_cmd("stop");
                 anyhow::bail!("search cancelled");
             }
             if start.elapsed() >= timeout {
-                return Ok(None);
+                return Ok(SearchOutcome {
+                    bestmove: None,
+                    info: best_info,
+                });
             }
             let remaining = timeout.saturating_sub(start.elapsed());
             let slice = remaining.min(Duration::from_millis(100));
@@ -212,7 +235,10 @@ impl UciEngine {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
                     if start.elapsed() >= timeout {
-                        return Ok(None);
+                        return Ok(SearchOutcome {
+                            bestmove: None,
+                            info: best_info,
+                        });
                     }
                     continue;
                 }
@@ -221,10 +247,58 @@ impl UciEngine {
                 }
             };
             debug!("[{}] << {}", self.name, line);
+            if let Some(info) = Self::parse_search_info(&line) {
+                if should_replace_info(best_info.as_ref(), &info) {
+                    best_info = Some(info);
+                }
+                continue;
+            }
             if line.starts_with("bestmove") {
-                return Ok(Some(line));
+                return Ok(SearchOutcome {
+                    bestmove: Self::parse_bestmove(&line),
+                    info: best_info,
+                });
             }
         }
+    }
+
+    pub fn parse_search_info(line: &str) -> Option<SearchInfo> {
+        if !line.starts_with("info ") {
+            return None;
+        }
+
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let mut depth: Option<u32> = None;
+        let mut score: Option<SearchScore> = None;
+        let mut pv: Vec<String> = Vec::new();
+        let mut idx = 1;
+
+        while idx < tokens.len() {
+            match tokens[idx] {
+                "depth" if idx + 1 < tokens.len() => {
+                    depth = tokens[idx + 1].parse::<u32>().ok();
+                    idx += 2;
+                }
+                "score" if idx + 2 < tokens.len() => {
+                    score = match tokens[idx + 1] {
+                        "cp" => tokens[idx + 2].parse::<i32>().ok().map(SearchScore::Cp),
+                        "mate" => tokens[idx + 2].parse::<i32>().ok().map(SearchScore::Mate),
+                        _ => None,
+                    };
+                    idx += 3;
+                }
+                "pv" => {
+                    pv = tokens[idx + 1..]
+                        .iter()
+                        .map(|token| (*token).to_string())
+                        .collect();
+                    break;
+                }
+                _ => idx += 1,
+            }
+        }
+
+        depth.map(|depth| SearchInfo { depth, score, pv })
     }
 
     /// Quit the engine
@@ -243,9 +317,21 @@ impl Drop for UciEngine {
     }
 }
 
+fn should_replace_info(current: Option<&SearchInfo>, candidate: &SearchInfo) -> bool {
+    match current {
+        None => true,
+        Some(current) => {
+            candidate.depth > current.depth
+                || (candidate.depth == current.depth
+                    && candidate.score.is_some()
+                    && current.score.is_none())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::UciEngine;
+    use super::{SearchInfo, SearchScore, UciEngine};
 
     #[test]
     fn validates_basic_uci_moves() {
@@ -254,5 +340,30 @@ mod tests {
         assert!(!UciEngine::is_valid_move("foo"));
         assert!(!UciEngine::is_valid_move("e9e4"));
         assert!(!UciEngine::is_valid_move("e2e4x"));
+    }
+
+    #[test]
+    fn parses_search_info_with_cp_score_and_pv() {
+        let info = UciEngine::parse_search_info(
+            "info depth 12 seldepth 18 score cp 34 nodes 1000 pv e2e4 e7e5",
+        )
+        .expect("expected info");
+        assert_eq!(
+            info,
+            SearchInfo {
+                depth: 12,
+                score: Some(SearchScore::Cp(34)),
+                pv: vec!["e2e4".into(), "e7e5".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_search_info_with_mate_score() {
+        let info = UciEngine::parse_search_info("info depth 9 score mate -3 nodes 500")
+            .expect("expected info");
+        assert_eq!(info.depth, 9);
+        assert_eq!(info.score, Some(SearchScore::Mate(-3)));
+        assert!(info.pv.is_empty());
     }
 }

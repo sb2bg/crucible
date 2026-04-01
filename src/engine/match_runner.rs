@@ -282,9 +282,9 @@ fn play_game_blocking(
             &mut black
         };
 
-        let bestmove_line = if let Some(nodes) = tc.nodes {
+        let search = if let Some(nodes) = tc.nodes {
             match current.go_nodes(&position, &moves, nodes, cancel_flag.as_deref()) {
-                Ok(line) => line,
+                Ok(outcome) => outcome,
                 Err(err) => {
                     if is_cancelled(cancel_flag.as_deref()) {
                         return Err(err);
@@ -296,7 +296,7 @@ fn play_game_blocking(
         } else {
             let remaining_before_move = if is_white_turn { wtime } else { btime };
             let turn_start = Instant::now();
-            let bestmove_line = current.go_position(
+            let search = current.go_position(
                 &position,
                 &moves,
                 wtime,
@@ -320,8 +320,8 @@ fn play_game_blocking(
                 };
                 return Ok((result, pgn_moves, move_count));
             }
-            match bestmove_line {
-                Ok(line) => line,
+            match search {
+                Ok(outcome) => outcome,
                 Err(err) => {
                     if is_cancelled(cancel_flag.as_deref()) {
                         return Err(err);
@@ -332,7 +332,7 @@ fn play_game_blocking(
             }
         };
 
-        let Some(bestmove_line) = bestmove_line else {
+        let Some(mv) = search.bestmove else {
             let result = if is_white_turn {
                 GameResult::BlackWin
             } else {
@@ -341,72 +341,67 @@ fn play_game_blocking(
             return Ok((result, pgn_moves, move_count));
         };
 
-        let bestmove = UciEngine::parse_bestmove(&bestmove_line);
-
-        match bestmove {
-            Some(mv) if mv != "(none)" && mv != "0000" => {
-                if !UciEngine::is_valid_move(&mv) {
-                    error!("engine returned invalid move '{}'", mv);
+        if mv != "(none)" && mv != "0000" {
+            if !UciEngine::is_valid_move(&mv) {
+                error!("engine returned invalid move '{}'", mv);
+                return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+            }
+            let parsed_move = match parse_uci_move(&board, &mv) {
+                Ok(parsed_move) => parsed_move,
+                Err(_) => {
+                    error!("engine returned unparsable move '{}'", mv);
                     return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
                 }
-                let parsed_move = match parse_uci_move(&board, &mv) {
-                    Ok(parsed_move) => parsed_move,
-                    Err(_) => {
-                        error!("engine returned unparsable move '{}'", mv);
-                        return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
-                    }
-                };
-                if !board.is_legal(parsed_move) {
-                    error!("engine returned illegal move '{}'", mv);
-                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
-                }
-                if !pgn_moves.is_empty() {
-                    pgn_moves.push(' ');
-                }
-                if move_count % 2 == 0 {
-                    pgn_moves.push_str(&format!("{}. ", move_count / 2 + 1));
-                }
-                pgn_moves.push_str(&mv);
+            };
+            if !board.is_legal(parsed_move) {
+                error!("engine returned illegal move '{}'", mv);
+                return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+            }
+            if !pgn_moves.is_empty() {
+                pgn_moves.push(' ');
+            }
+            if move_count % 2 == 0 {
+                pgn_moves.push_str(&format!("{}. ", move_count / 2 + 1));
+            }
+            pgn_moves.push_str(&mv);
 
-                moves.push(mv);
-                move_count += 1;
-                board.play(parsed_move);
+            moves.push(mv);
+            move_count += 1;
+            board.play(parsed_move);
 
-                // Apply increment after a completed move.
-                if tc.nodes.is_none() {
-                    if is_white_turn {
-                        wtime += tc.increment_ms;
+            // Apply increment after a completed move.
+            if tc.nodes.is_none() {
+                if is_white_turn {
+                    wtime += tc.increment_ms;
+                } else {
+                    btime += tc.increment_ms;
+                }
+            }
+
+            if record_position(&mut seen_positions, &board) >= 3 {
+                return Ok((GameResult::Draw, pgn_moves, move_count));
+            }
+
+            match board.status() {
+                GameStatus::Won => {
+                    let result = if is_white_turn {
+                        GameResult::WhiteWin
                     } else {
-                        btime += tc.increment_ms;
-                    }
+                        GameResult::BlackWin
+                    };
+                    return Ok((result, pgn_moves, move_count));
                 }
-
-                if record_position(&mut seen_positions, &board) >= 3 {
+                GameStatus::Drawn => {
                     return Ok((GameResult::Draw, pgn_moves, move_count));
                 }
-
-                match board.status() {
-                    GameStatus::Won => {
-                        let result = if is_white_turn {
-                            GameResult::WhiteWin
-                        } else {
-                            GameResult::BlackWin
-                        };
-                        return Ok((result, pgn_moves, move_count));
-                    }
-                    GameStatus::Drawn => {
-                        return Ok((GameResult::Draw, pgn_moves, move_count));
-                    }
-                    GameStatus::Ongoing => {}
-                }
+                GameStatus::Ongoing => {}
             }
-            _ => {
-                return Ok((
-                    resolve_no_move_result(&board, is_white_turn),
-                    pgn_moves,
-                    move_count,
-                ));
-            }
+        } else {
+            return Ok((
+                resolve_no_move_result(&board, is_white_turn),
+                pgn_moves,
+                move_count,
+            ));
         }
     }
 }

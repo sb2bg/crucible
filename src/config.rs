@@ -19,6 +19,9 @@ pub struct Config {
     pub testing: TestingConfig,
 
     #[serde(default)]
+    pub training: TrainingConfig,
+
+    #[serde(default)]
     pub engines: Vec<EngineConfig>,
 }
 
@@ -116,6 +119,31 @@ impl Default for TestingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingConfig {
+    #[serde(default = "default_training_output_dir")]
+    pub output_dir: PathBuf,
+    #[serde(default = "default_selfplay_games")]
+    pub selfplay_games: u32,
+}
+
+fn default_training_output_dir() -> PathBuf {
+    PathBuf::from(".crucible/training")
+}
+
+fn default_selfplay_games() -> u32 {
+    100
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: default_training_output_dir(),
+            selfplay_games: default_selfplay_games(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeControlConfig {
     #[serde(default = "default_base_ms")]
     pub base_ms: u64,
@@ -199,6 +227,7 @@ impl Default for Config {
             data_dir: default_data_dir(),
             server: ServerConfig::default(),
             testing: TestingConfig::default(),
+            training: TrainingConfig::default(),
             engines: Vec::new(),
         }
     }
@@ -233,6 +262,7 @@ impl Config {
                 concurrency: 4,
                 ..Default::default()
             },
+            training: TrainingConfig::default(),
             engines: vec![EngineConfig {
                 name: "my-engine".into(),
                 repo: "https://github.com/user/chess-engine".into(),
@@ -260,6 +290,9 @@ impl Config {
         }
         if self.testing.poll_interval_seconds == 0 {
             anyhow::bail!("testing.poll_interval_seconds must be at least 1");
+        }
+        if self.training.selfplay_games == 0 {
+            anyhow::bail!("training.selfplay_games must be at least 1");
         }
         if self.testing.time_control.base_ms == 0 && self.testing.time_control.nodes.is_none() {
             anyhow::bail!("time control must specify positive base_ms or nodes");

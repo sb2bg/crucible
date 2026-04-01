@@ -28,6 +28,7 @@ pub enum MatchEvent {
     GameCompleted {
         game_number: u32,
         result: GameResult,
+        record: GameRecord,
     },
     SprtUpdate {
         wins: u32,
@@ -119,11 +120,13 @@ pub async fn run_match(
                         opening: opening.clone(),
                         move_count,
                     };
+                    let event_record = record.clone();
                     games.push(record);
 
                     let _ = event_tx.send(MatchEvent::GameCompleted {
                         game_number,
                         result: game_result,
+                        record: event_record,
                     });
                 }
                 Err(e) => {

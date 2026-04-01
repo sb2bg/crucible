@@ -567,6 +567,39 @@ impl Storage {
         }
     }
 
+    pub fn requeue_running_jobs(&self) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM games
+             WHERE test_job_id IN (
+                 SELECT id FROM test_jobs WHERE status = ?1
+             )",
+            params![encode_test_status(TestStatus::Running)],
+        )?;
+        let reset = tx.execute(
+            "UPDATE test_jobs
+             SET status = ?1,
+                 started_at = NULL,
+                 completed_at = NULL,
+                 wins = 0,
+                 losses = 0,
+                 draws = 0,
+                 elo_diff = NULL,
+                 elo_error = NULL,
+                 los = NULL,
+                 sprt_result = ?2
+             WHERE status = ?3",
+            params![
+                encode_test_status(TestStatus::Queued),
+                encode_sprt_result(SprtResult::Inconclusive),
+                encode_test_status(TestStatus::Running),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(reset)
+    }
+
     pub fn update_job_result(
         &self,
         job_id: &str,
@@ -1493,6 +1526,73 @@ mod tests {
         let err = storage.delete_engine(&engine.id).unwrap_err().to_string();
         assert!(err.contains("cannot delete engine while jobs are still running"));
         assert!(storage.get_engine_by_name(&engine.name)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn requeues_running_jobs_and_clears_partial_progress() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        let base = test_revision(&engine.id, "rev-base", "aaaa");
+        let dev = test_revision(&engine.id, "rev-dev", "bbbb");
+        let mut job = test_job(&engine.id, &dev.id, &base.id);
+        job.status = TestStatus::Running;
+        job.started_at = Some(Utc::now());
+
+        storage.insert_engine(&engine)?;
+        storage.insert_revision(&base)?;
+        storage.insert_revision(&dev)?;
+        storage.insert_test_job(&job)?;
+        storage.update_job_result(&job.id, 3, 2, 1, 4.2, 1.0, 0.8, SprtResult::Inconclusive)?;
+        storage.insert_game(
+            &job.id,
+            &GameRecord {
+                game_number: 1,
+                result: GameResult::Draw,
+                pgn: "*".into(),
+                opening: "startpos".into(),
+                move_count: 1,
+            },
+        )?;
+
+        assert_eq!(storage.requeue_running_jobs()?, 1);
+
+        let conn = storage.conn.lock().unwrap();
+        let (status, started_at, wins, losses, draws, sprt_result): (
+            String,
+            Option<String>,
+            u32,
+            u32,
+            u32,
+            String,
+        ) = conn.query_row(
+            "SELECT status, started_at, wins, losses, draws, sprt_result
+             FROM test_jobs
+             WHERE id = ?1",
+            params![job.id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        let games: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM games WHERE test_job_id = ?1",
+            params![job.id],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+
+        assert_eq!(decode_test_status(&status)?, TestStatus::Queued);
+        assert!(started_at.is_none());
+        assert_eq!((wins, losses, draws), (0, 0, 0));
+        assert_eq!(decode_sprt_result(&sprt_result)?, SprtResult::Inconclusive);
+        assert_eq!(games, 0);
         Ok(())
     }
 }

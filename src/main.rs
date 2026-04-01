@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,10 +9,11 @@ use tracing_subscriber::EnvFilter;
 
 use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
 use crucible::config::Config;
-use crucible::engine::match_runner::{run_match, MatchConfig};
+use crucible::engine::match_runner::{run_match, MatchConfig, MatchEvent};
 use crucible::git::{short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
+use crucible::sprt::{elo_error, los, wdl_to_elo};
 use crucible::storage::Storage;
 use crucible::types::{
     BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
@@ -406,6 +407,14 @@ async fn main() -> Result<()> {
 async fn run_test_loop(storage: Storage, config: Config) {
     info!("Test loop started");
     let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
+    match storage.requeue_running_jobs() {
+        Ok(0) => {}
+        Ok(count) => warn!(
+            "Re-queued {} interrupted running job(s) after restart",
+            count
+        ),
+        Err(err) => tracing::error!("Failed to recover interrupted jobs: {}", err),
+    }
 
     loop {
         // 1. For each tracked engine, fetch latest commits
@@ -555,6 +564,15 @@ async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
                 let _ = storage.mark_bisect_session_failed_for_job(&job.id);
                 return;
             }
+            info!(
+                "Completed job {} after {} games: W{} D{} L{} ({:?})",
+                job.id,
+                result.total_games(),
+                result.wins,
+                result.draws,
+                result.losses,
+                result.sprt_result
+            );
 
             if let Err(err) = advance_bisect_after_job(&storage, &config, &job, &result) {
                 tracing::error!("Failed to advance bisect for job {}: {}", job.id, err);
@@ -657,7 +675,7 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         .clone()
         .with_context(|| format!("Revision '{}' is missing a built binary", base_revision.id))?;
 
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let cancel_storage = storage.clone();
     let cancel_job_id = job.id.clone();
@@ -678,6 +696,11 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
             }
         })
     };
+    let progress_storage = storage.clone();
+    let progress_job_id = job.id.clone();
+    let progress_task = tokio::spawn(async move {
+        persist_job_progress(progress_storage, progress_job_id, event_rx).await
+    });
     configured_sprt_bounds(config, job.job_type).validate()?;
     let result = run_match(
         MatchConfig {
@@ -699,6 +722,11 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
     )
     .await;
     cancel_watch.abort();
+    match progress_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(err) => return Err(anyhow!("job progress task panicked: {}", err)),
+    }
     result
 }
 
@@ -735,11 +763,43 @@ fn persist_job_result(storage: &Storage, job: &TestJob, result: &TestResult) -> 
         result.sprt_result,
     )?;
 
-    for game in &result.games {
-        storage.insert_game(&job.id, game)?;
+    storage.set_job_status(&job.id, TestStatus::Completed)?;
+    Ok(())
+}
+
+async fn persist_job_progress(
+    storage: Storage,
+    job_id: String,
+    mut event_rx: mpsc::UnboundedReceiver<MatchEvent>,
+) -> Result<()> {
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            MatchEvent::GameCompleted { record, .. } => {
+                storage.insert_game(&job_id, &record)?;
+            }
+            MatchEvent::SprtUpdate {
+                wins,
+                draws,
+                losses,
+                llr_status,
+            } => {
+                storage.update_job_result(
+                    &job_id,
+                    wins,
+                    losses,
+                    draws,
+                    wdl_to_elo(wins, draws, losses),
+                    elo_error(wins, draws, losses),
+                    los(wins, losses),
+                    llr_status,
+                )?;
+            }
+            MatchEvent::GameStarted { .. }
+            | MatchEvent::MatchCompleted { .. }
+            | MatchEvent::Error { .. } => {}
+        }
     }
 
-    storage.set_job_status(&job.id, TestStatus::Completed)?;
     Ok(())
 }
 

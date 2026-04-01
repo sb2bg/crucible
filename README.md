@@ -94,11 +94,11 @@ Edit `crucible.toml`:
 ```toml
 [server]
 web_port = 8877
-web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+web_host = "127.0.0.1"    # use "0.0.0.0" in Docker
 admin_token = "change-me" # optional; protects /api/admin/* with Bearer auth
 
 [testing]
-concurrency = 4           # Test jobs to run in parallel
+concurrency = 4            # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance

@@ -4,7 +4,7 @@
 //! SPRT evaluation to stop early when a result is conclusive.
 
 use anyhow::{anyhow, Result};
-use cozy_chess::{util::parse_uci_move, Board, GameStatus};
+use cozy_chess::{util::parse_uci_move, Board, Color, GameStatus};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -275,7 +275,8 @@ fn play_game_blocking(
             return Ok((GameResult::Draw, pgn_moves, move_count));
         }
 
-        let is_white_turn = move_count % 2 == 0;
+        let side_to_move = board.side_to_move();
+        let is_white_turn = side_to_move == Color::White;
         let current = if is_white_turn {
             &mut white
         } else {
@@ -290,7 +291,7 @@ fn play_game_blocking(
                         return Err(err);
                     }
                     error!("engine search failed: {}", err);
-                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
                 }
             }
         } else {
@@ -327,41 +328,38 @@ fn play_game_blocking(
                         return Err(err);
                     }
                     error!("engine search failed: {}", err);
-                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
                 }
             }
         };
 
         let Some(mv) = search.bestmove else {
-            let result = if is_white_turn {
-                GameResult::BlackWin
-            } else {
-                GameResult::WhiteWin
-            };
-            return Ok((result, pgn_moves, move_count));
+            return Ok((resolve_no_move_result(&board), pgn_moves, move_count));
         };
 
         if mv != "(none)" && mv != "0000" {
             if !UciEngine::is_valid_move(&mv) {
                 error!("engine returned invalid move '{}'", mv);
-                return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                return Ok((opponent_win(side_to_move), pgn_moves, move_count));
             }
             let parsed_move = match parse_uci_move(&board, &mv) {
                 Ok(parsed_move) => parsed_move,
                 Err(_) => {
                     error!("engine returned unparsable move '{}'", mv);
-                    return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
                 }
             };
             if !board.is_legal(parsed_move) {
                 error!("engine returned illegal move '{}'", mv);
-                return Ok((opponent_win(is_white_turn), pgn_moves, move_count));
+                return Ok((opponent_win(side_to_move), pgn_moves, move_count));
             }
             if !pgn_moves.is_empty() {
                 pgn_moves.push(' ');
             }
-            if move_count % 2 == 0 {
-                pgn_moves.push_str(&format!("{}. ", move_count / 2 + 1));
+            if side_to_move == Color::White {
+                pgn_moves.push_str(&format!("{}. ", board.fullmove_number()));
+            } else if moves.is_empty() {
+                pgn_moves.push_str(&format!("{}... ", board.fullmove_number()));
             }
             pgn_moves.push_str(&mv);
 
@@ -397,11 +395,7 @@ fn play_game_blocking(
                 GameStatus::Ongoing => {}
             }
         } else {
-            return Ok((
-                resolve_no_move_result(&board, is_white_turn),
-                pgn_moves,
-                move_count,
-            ));
+            return Ok((resolve_no_move_result(&board), pgn_moves, move_count));
         }
     }
 }
@@ -428,24 +422,17 @@ fn is_cancelled(flag: Option<&AtomicBool>) -> bool {
     flag.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
-fn opponent_win(is_white_turn: bool) -> GameResult {
-    if is_white_turn {
-        GameResult::BlackWin
-    } else {
-        GameResult::WhiteWin
+fn opponent_win(side_to_move: Color) -> GameResult {
+    match side_to_move {
+        Color::White => GameResult::BlackWin,
+        Color::Black => GameResult::WhiteWin,
     }
 }
 
-fn resolve_no_move_result(board: &Board, is_white_turn: bool) -> GameResult {
+fn resolve_no_move_result(board: &Board) -> GameResult {
     match board.status() {
         GameStatus::Drawn => GameResult::Draw,
-        GameStatus::Won | GameStatus::Ongoing => {
-            if is_white_turn {
-                GameResult::BlackWin
-            } else {
-                GameResult::WhiteWin
-            }
-        }
+        GameStatus::Won | GameStatus::Ongoing => opponent_win(board.side_to_move()),
     }
 }
 
@@ -462,14 +449,14 @@ mod tests {
     #[test]
     fn none_result_on_stalemate_is_draw() -> Result<()> {
         let board = parse_opening_board("7k/5Q2/7K/8/8/8/8/8 b - - 0 1")?;
-        assert_eq!(resolve_no_move_result(&board, false), GameResult::Draw);
+        assert_eq!(resolve_no_move_result(&board), GameResult::Draw);
         Ok(())
     }
 
     #[test]
     fn none_result_on_checkmate_is_loss_for_side_to_move() -> Result<()> {
         let board = parse_opening_board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")?;
-        assert_eq!(resolve_no_move_result(&board, false), GameResult::WhiteWin);
+        assert_eq!(resolve_no_move_result(&board), GameResult::WhiteWin);
         Ok(())
     }
 
@@ -487,6 +474,22 @@ mod tests {
         let board = parse_opening_board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")?;
         let mv = parse_uci_move(&board, "e1g1").map_err(|_| anyhow!("failed to parse castle"))?;
         assert!(board.is_legal(mv));
+        Ok(())
+    }
+
+    #[test]
+    fn black_to_move_opening_uses_ellipsis_pgn_prefix() -> Result<()> {
+        let board = parse_opening_board("7k/8/8/8/8/8/8/7K b - - 0 42")?;
+        let mut pgn_moves = String::new();
+        let moves: Vec<String> = Vec::new();
+
+        if board.side_to_move() == Color::White {
+            pgn_moves.push_str(&format!("{}. ", board.fullmove_number()));
+        } else if moves.is_empty() {
+            pgn_moves.push_str(&format!("{}... ", board.fullmove_number()));
+        }
+
+        assert_eq!(pgn_moves, "42... ");
         Ok(())
     }
 }

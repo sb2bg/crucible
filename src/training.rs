@@ -185,14 +185,14 @@ fn play_selfplay_game(
             break GameResult::Draw;
         }
 
-        let is_white_turn = move_count % 2 == 0;
+        let side_to_move = board.side_to_move();
+        let is_white_turn = side_to_move == Color::White;
         let current = if is_white_turn {
             &mut white
         } else {
             &mut black
         };
         let fen = board.to_string();
-        let side_to_move = board.side_to_move();
         let search = if let Some(nodes) = tc.nodes {
             current.go_nodes(&position, &moves, nodes, None)?
         } else {
@@ -215,26 +215,26 @@ fn play_selfplay_game(
                 btime = btime.saturating_sub(elapsed_ms);
             }
             if elapsed_ms >= remaining_before_move {
-                break opponent_win(is_white_turn);
+                break opponent_win(side_to_move);
             }
             search
         };
 
         let Some(bestmove) = search.bestmove else {
-            break resolve_no_move_result(&board, is_white_turn);
+            break resolve_no_move_result(&board);
         };
 
         if bestmove == "(none)" || bestmove == "0000" {
-            break resolve_no_move_result(&board, is_white_turn);
+            break resolve_no_move_result(&board);
         }
         if !UciEngine::is_valid_move(&bestmove) {
-            break opponent_win(is_white_turn);
+            break opponent_win(side_to_move);
         }
 
         let parsed_move = parse_uci_move(&board, &bestmove)
             .map_err(|_| anyhow!("invalid move '{}'", bestmove))?;
         if !board.is_legal(parsed_move) {
-            break opponent_win(is_white_turn);
+            break opponent_win(side_to_move);
         }
 
         if let Some(info) = search.info {
@@ -370,18 +370,17 @@ fn per_move_timeout(remaining_ms: u64, increment_ms: u64) -> Duration {
     )
 }
 
-fn opponent_win(is_white_turn: bool) -> GameResult {
-    if is_white_turn {
-        GameResult::BlackWin
-    } else {
-        GameResult::WhiteWin
+fn opponent_win(side_to_move: Color) -> GameResult {
+    match side_to_move {
+        Color::White => GameResult::BlackWin,
+        Color::Black => GameResult::WhiteWin,
     }
 }
 
-fn resolve_no_move_result(board: &Board, is_white_turn: bool) -> GameResult {
+fn resolve_no_move_result(board: &Board) -> GameResult {
     match board.status() {
         GameStatus::Drawn => GameResult::Draw,
-        GameStatus::Won | GameStatus::Ongoing => opponent_win(is_white_turn),
+        GameStatus::Won | GameStatus::Ongoing => opponent_win(board.side_to_move()),
     }
 }
 
@@ -452,6 +451,13 @@ mod tests {
 
         assert_ne!(first, second);
         fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_move_result_uses_board_side_to_move() -> Result<()> {
+        let board = parse_opening_board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")?;
+        assert_eq!(resolve_no_move_result(&board), GameResult::WhiteWin);
         Ok(())
     }
 }

@@ -51,7 +51,7 @@ cargo build --release
 
 The web dashboard is available at `http://localhost:8877` by default.
 
-The dashboard now includes an admin tab for adding/removing engines, queueing manual tests, starting regression hunts, and cancelling queued/running jobs. If you expose it beyond localhost, put it behind an auth layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control.
+The dashboard now includes an admin tab for adding/removing engines, queueing manual tests, starting regression hunts, and cancelling queued/running jobs, plus a training tab that summarizes self-play export runs and depth-bucket counts. If you expose it beyond localhost, put it behind an auth layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control.
 
 ## Docker
 

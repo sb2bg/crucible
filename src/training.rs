@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use cozy_chess::{util::parse_uci_move, Board, Color, GameStatus};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -36,6 +36,21 @@ pub struct SelfPlayDataSummary {
     pub depth_counts: BTreeMap<u32, usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingRunSummary {
+    pub engine_id: String,
+    pub engine_name: String,
+    pub revision_id: String,
+    pub revision_hash: String,
+    pub games_requested: u32,
+    pub games_played: u32,
+    pub samples_written: usize,
+    pub time_control: String,
+    pub output_depth_counts: BTreeMap<u32, usize>,
+    pub created_at: String,
+    pub run_dir: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 struct PendingSample {
     game_number: u32,
@@ -66,7 +81,7 @@ struct TrainingSample {
     result: i8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RunMetadata {
     engine_id: String,
     engine_name: String,
@@ -78,6 +93,63 @@ struct RunMetadata {
     time_control: String,
     output_depth_counts: BTreeMap<u32, usize>,
     created_at: String,
+}
+
+pub fn list_training_runs(base: &Path) -> Result<Vec<TrainingRunSummary>> {
+    let mut runs = Vec::new();
+    if !base.exists() {
+        return Ok(runs);
+    }
+
+    for engine_entry in fs::read_dir(base)? {
+        let engine_entry = engine_entry?;
+        if !engine_entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        for revision_entry in fs::read_dir(engine_entry.path())? {
+            let revision_entry = revision_entry?;
+            if !revision_entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            for run_entry in fs::read_dir(revision_entry.path())? {
+                let run_entry = run_entry?;
+                if !run_entry.file_type()?.is_dir() {
+                    continue;
+                }
+
+                let metadata_path = run_entry.path().join("metadata.json");
+                if !metadata_path.exists() {
+                    continue;
+                }
+
+                let metadata = fs::read(&metadata_path)?;
+                let run: RunMetadata = serde_json::from_slice(&metadata)?;
+                runs.push(TrainingRunSummary {
+                    engine_id: run.engine_id,
+                    engine_name: run.engine_name,
+                    revision_id: run.revision_id,
+                    revision_hash: run.revision_hash,
+                    games_requested: run.games_requested,
+                    games_played: run.games_played,
+                    samples_written: run.samples_written,
+                    time_control: run.time_control,
+                    output_depth_counts: run.output_depth_counts,
+                    created_at: run.created_at,
+                    run_dir: run_entry.path(),
+                });
+            }
+        }
+    }
+
+    runs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.run_dir.cmp(&left.run_dir))
+    });
+    Ok(runs)
 }
 
 pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPlayDataSummary> {
@@ -450,6 +522,59 @@ mod tests {
         let second = prepare_run_dir(&base, "Sykora", "abcd")?;
 
         assert_ne!(first, second);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lists_training_runs_from_metadata_files() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("crucible-training-list-{}", Uuid::new_v4()));
+        let older_dir = base.join("Sykora").join("oldrev").join("old-run");
+        let newer_dir = base.join("Sykora").join("newrev").join("new-run");
+        fs::create_dir_all(&older_dir)?;
+        fs::create_dir_all(&newer_dir)?;
+
+        let older = RunMetadata {
+            engine_id: "engine-1".into(),
+            engine_name: "Sykora".into(),
+            revision_id: "rev-old".into(),
+            revision_hash: "oldrev".into(),
+            games_requested: 10,
+            games_played: 8,
+            samples_written: 100,
+            time_control: "10+0.1".into(),
+            output_depth_counts: BTreeMap::from([(10, 60), (11, 40)]),
+            created_at: "2026-04-01T00:00:00Z".into(),
+        };
+        let newer = RunMetadata {
+            engine_id: "engine-1".into(),
+            engine_name: "Sykora".into(),
+            revision_id: "rev-new".into(),
+            revision_hash: "newrev".into(),
+            games_requested: 12,
+            games_played: 12,
+            samples_written: 140,
+            time_control: "10+0.1".into(),
+            output_depth_counts: BTreeMap::from([(11, 50), (12, 90)]),
+            created_at: "2026-04-02T00:00:00Z".into(),
+        };
+
+        fs::write(
+            older_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&older)?,
+        )?;
+        fs::write(
+            newer_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&newer)?,
+        )?;
+
+        let runs = list_training_runs(&base)?;
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].revision_hash, "newrev");
+        assert_eq!(runs[0].samples_written, 140);
+        assert_eq!(runs[1].revision_hash, "oldrev");
+        assert_eq!(runs[1].output_depth_counts.get(&10), Some(&60));
+
         fs::remove_dir_all(base)?;
         Ok(())
     }

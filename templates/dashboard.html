@@ -770,6 +770,7 @@
     <button class="tab" data-tab="timeline">Timeline</button>
     <button class="tab" data-tab="jobs">Jobs</button>
     <button class="tab" data-tab="bisect">Bisect</button>
+    <button class="tab" data-tab="training">Training</button>
     <button class="tab" data-tab="admin">Admin</button>
   </div>
 
@@ -893,6 +894,33 @@
     </div>
     <div class="bisect-list" id="bisect-list"></div>
     <div class="empty" id="bisect-empty">No active bisect sessions.</div>
+  </section>
+
+  <section class="panel" id="panel-training">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Training</h2>
+        <p class="panel-subtitle">self-play export runs and sampled position counts by depth</p>
+      </div>
+      <button type="button" id="refresh-training">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Engine</th>
+            <th>Revision</th>
+            <th>Games</th>
+            <th>Samples</th>
+            <th>Depth buckets</th>
+            <th>Output</th>
+          </tr>
+        </thead>
+        <tbody id="training-body"></tbody>
+      </table>
+    </div>
+    <div class="empty hidden" id="training-empty">No training-data runs found.</div>
   </section>
 
   <section class="panel" id="panel-admin">
@@ -1043,6 +1071,7 @@
   document.getElementById('refresh-timeline').addEventListener('click', () => loadTimeline('timeline'));
   document.getElementById('refresh-jobs').addEventListener('click', loadJobs);
   document.getElementById('refresh-bisect').addEventListener('click', loadBisect);
+  document.getElementById('refresh-training').addEventListener('click', loadTrainingRuns);
   document.getElementById('overview-engine-select').addEventListener('change', () => loadTimeline('overview'));
   document.getElementById('timeline-engine-select').addEventListener('change', () => loadTimeline('timeline'));
   document.getElementById('add-engine-form').addEventListener('submit', handleAddEngine);
@@ -1158,6 +1187,7 @@
     panels.forEach(panel => panel.classList.toggle('active', panel.id === `panel-${tabName}`));
     if (tabName === 'jobs') loadJobs();
     if (tabName === 'bisect') loadBisect();
+    if (tabName === 'training') loadTrainingRuns();
     if (tabName === 'timeline') loadTimeline('timeline');
     if (tabName === 'admin') renderAdminEngineList();
   }
@@ -1167,6 +1197,7 @@
     await Promise.allSettled([updateStatus(), loadEngines()]);
     if (state.activeTab === 'jobs') loadJobs();
     if (state.activeTab === 'bisect') loadBisect();
+    if (state.activeTab === 'training') loadTrainingRuns();
     if (state.activeTab === 'timeline') loadTimeline('timeline');
     loadTimeline('overview');
   }
@@ -1559,6 +1590,45 @@
     } catch (error) {
       showToast(error.message, 'error');
     }
+  }
+
+  async function loadTrainingRuns() {
+    try {
+      const payload = await api('/api/training/runs');
+      const runs = payload.runs || [];
+      const body = document.getElementById('training-body');
+      const empty = document.getElementById('training-empty');
+      if (!runs.length) {
+        body.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+
+      empty.classList.add('hidden');
+      body.innerHTML = runs.map(run => `
+        <tr>
+          <td title="${escapeHtml(run.created_at)}">${timeAgo(run.created_at)}</td>
+          <td>${escapeHtml(run.engine_name)}</td>
+          <td class="mono">${escapeHtml((run.revision_hash || '').slice(0, 8))}</td>
+          <td class="mono">${Number(run.games_played || 0).toLocaleString()} / ${Number(run.games_requested || 0).toLocaleString()}</td>
+          <td class="mono">${Number(run.samples_written || 0).toLocaleString()}</td>
+          <td>${renderDepthBuckets(run.output_depth_counts || {})}</td>
+          <td class="mono">${escapeHtml(run.run_dir || '')}</td>
+        </tr>
+      `).join('');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  function renderDepthBuckets(depthCounts) {
+    const entries = Object.entries(depthCounts)
+      .map(([depth, count]) => [Number(depth), Number(count)])
+      .sort((left, right) => left[0] - right[0]);
+    if (!entries.length) return '—';
+    return entries
+      .map(([depth, count]) => `<span class="tag mono">d${String(depth).padStart(2, '0')}: ${count.toLocaleString()}</span>`)
+      .join(' ');
   }
 
   async function loadBisect() {
@@ -1999,7 +2069,7 @@
 
   async function refreshAfterMutation() {
     state.chartCache = {};
-    await Promise.allSettled([updateStatus(), loadEngines(), loadJobs(), loadBisect()]);
+    await Promise.allSettled([updateStatus(), loadEngines(), loadJobs(), loadBisect(), loadTrainingRuns()]);
     loadTimeline('overview');
     if (state.activeTab === 'timeline') loadTimeline('timeline');
   }
@@ -2087,6 +2157,9 @@
     if (state.activeTab === 'overview') loadTimeline('overview');
     if (state.activeTab === 'timeline') loadTimeline('timeline');
   }, 30000);
+  setInterval(() => {
+    if (state.activeTab === 'training') loadTrainingRuns();
+  }, 10000);
 </script>
 </body>
 </html>

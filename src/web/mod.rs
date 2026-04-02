@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::git::{short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
+use crate::training::list_training_runs;
 use crate::types::{Engine, EngineRevision, JobSummary, TestStatus, TimeControl};
 
 pub struct WebState {
@@ -38,6 +39,7 @@ pub fn create_router(storage: Storage, config: Config) -> Router {
         .route("/api/timeline/:engine_id", get(timeline_handler))
         .route("/api/jobs", get(jobs_handler))
         .route("/api/bisect", get(active_bisect_sessions_handler))
+        .route("/api/training/runs", get(training_runs_handler))
         .route(
             "/api/revisions/:engine_id/:revision_ref",
             get(revision_details_handler),
@@ -180,6 +182,13 @@ async fn jobs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 async fn active_bisect_sessions_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     match state.storage.get_running_bisect_sessions() {
         Ok(sessions) => Json(serde_json::to_value(sessions).unwrap()).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    }
+}
+
+async fn training_runs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    match list_training_runs(&state.config.training.output_dir) {
+        Ok(runs) => Json(json!({ "runs": runs })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }

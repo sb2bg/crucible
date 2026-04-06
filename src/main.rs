@@ -573,20 +573,34 @@ async fn run_test_loop(storage: Storage, config: Config) {
         // 2. Process queued jobs
         let mut workers = tokio::task::JoinSet::new();
         loop {
-            while workers.len() < worker_count {
-                match storage.claim_next_job() {
-                    Ok(Some(job)) => {
-                        let job_storage = storage.clone();
-                        let job_config = config.clone();
-                        workers.spawn(async move {
-                            process_claimed_job(job_storage, job_config, job).await;
-                        });
+            let available_slots = worker_count.saturating_sub(workers.len());
+            if available_slots > 0 {
+                let mut claimed_jobs = Vec::new();
+                for _ in 0..available_slots {
+                    match storage.claim_next_job() {
+                        Ok(Some(job)) => claimed_jobs.push(job),
+                        Ok(None) => break,
+                        Err(err) => {
+                            tracing::error!("Failed to claim next job: {}", err);
+                            break;
+                        }
                     }
-                    Ok(None) => break,
-                    Err(err) => {
-                        tracing::error!("Failed to claim next job: {}", err);
-                        break;
-                    }
+                }
+
+                let idle_parallel_games = u32::try_from(worker_count).unwrap_or(1);
+                let single_job_fanout = workers.is_empty() && claimed_jobs.len() == 1;
+
+                for job in claimed_jobs {
+                    let job_storage = storage.clone();
+                    let job_config = config.clone();
+                    let parallel_games = if single_job_fanout {
+                        idle_parallel_games
+                    } else {
+                        1
+                    };
+                    workers.spawn(async move {
+                        process_claimed_job(job_storage, job_config, job, parallel_games).await;
+                    });
                 }
             }
 
@@ -662,13 +676,13 @@ fn resolve_selfplay_revision(
         })
 }
 
-async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
+async fn process_claimed_job(storage: Storage, config: Config, job: TestJob, parallel_games: u32) {
     info!(
         "Running job {} (dev={}, base={})",
         job.id, job.dev_revision_id, job.base_revision_id
     );
 
-    match execute_job(&storage, &config, &job).await {
+    match execute_job(&storage, &config, &job, parallel_games).await {
         Ok(result) => {
             if matches!(
                 storage.get_job_status(&job.id),
@@ -785,7 +799,12 @@ fn sync_engine_revisions(
     Ok(())
 }
 
-async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Result<TestResult> {
+async fn execute_job(
+    storage: &Storage,
+    config: &Config,
+    job: &TestJob,
+    parallel_games: u32,
+) -> Result<TestResult> {
     let engine = storage
         .get_engine_by_id(&job.engine_id)?
         .with_context(|| format!("Missing engine '{}'", job.engine_id))?;
@@ -861,6 +880,7 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
             )?,
             sprt_bounds: configured_sprt_bounds(config, job.job_type),
             max_games: config.testing.max_games,
+            parallel_games,
             hash_mb: config.testing.hash_mb,
             threads: config.testing.engine_threads,
             cancel_flag: Some(cancel_flag),

@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::warn;
 
 use crate::bisect::{BisectRunner, BisectStep};
@@ -26,10 +26,10 @@ use crate::types::{Engine, EngineRevision, JobSummary, TestStatus, TimeControl};
 
 pub struct WebState {
     pub storage: Storage,
-    pub config: Config,
+    pub config: Arc<RwLock<Config>>,
 }
 
-pub fn create_router(storage: Storage, config: Config) -> Router {
+pub fn create_router(storage: Storage, config: Arc<RwLock<Config>>) -> Router {
     let state = Arc::new(WebState { storage, config });
 
     Router::new()
@@ -168,6 +168,10 @@ impl BranchLane {
     }
 }
 
+fn current_config(state: &WebState) -> Config {
+    state.config.read().expect("shared config poisoned").clone()
+}
+
 async fn index_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
@@ -249,7 +253,8 @@ async fn active_bisect_sessions_handler(State(state): State<Arc<WebState>>) -> i
 }
 
 async fn training_runs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    match list_training_runs(&state.config.training.output_dir) {
+    let config = current_config(&state);
+    match list_training_runs(&config.training.output_dir) {
         Ok(runs) => Json(json!({ "runs": runs })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
@@ -322,7 +327,8 @@ async fn export_bundle_handler(
         return response;
     }
 
-    match build_export_bundle(&state.storage, &state.config) {
+    let config = current_config(&state);
+    match build_export_bundle(&state.storage, &config) {
         Ok(bundle) => {
             let filename = format!(
                 "crucible-export-{}.json",
@@ -478,6 +484,7 @@ fn create_or_update_engine(
     experimental_branches: Vec<String>,
 ) -> anyhow::Result<Engine> {
     let existing = state.storage.get_engine_by_name(request.name.trim())?;
+    let config = current_config(state);
     let engine = Engine {
         id: existing
             .as_ref()
@@ -485,11 +492,7 @@ fn create_or_update_engine(
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         name: request.name.trim().to_string(),
         repo_url: request.repo.trim().to_string(),
-        local_path: state
-            .config
-            .data_dir
-            .join("repos")
-            .join(request.name.trim()),
+        local_path: config.data_dir.join("repos").join(request.name.trim()),
         branches,
         experimental_branches,
         build_cmd: request.build_cmd.trim().to_string(),
@@ -579,7 +582,8 @@ fn queue_manual_test(
         .get_revision_by_hash_prefix(&engine.id, request.base.trim())?
         .ok_or_else(|| anyhow::anyhow!("could not resolve base commit"))?;
 
-    let scheduler = Scheduler::new(state.storage.clone(), state.config.clone());
+    let config = current_config(state);
+    let scheduler = Scheduler::new(state.storage.clone(), config);
     let job = scheduler.schedule_manual_test(&engine.id, &dev_revision.id, &base_revision.id)?;
 
     Ok(json!({
@@ -887,7 +891,7 @@ fn queue_bisect_probe(
         engine_id,
         &test_revision.id,
         baseline_revision_id,
-        configured_time_control(&state.config),
+        configured_time_control(&current_config(&state)),
     );
     session.current_job_id = Some(job.id.clone());
     state.storage.insert_test_job(&job)?;
@@ -913,7 +917,8 @@ fn json_error(status: StatusCode, err: impl std::fmt::Display) -> Response {
 }
 
 fn authorize_admin(headers: &HeaderMap, state: &WebState) -> Result<(), Response> {
-    let Some(expected_token) = state.config.server.admin_token.as_deref() else {
+    let config = current_config(state);
+    let Some(expected_token) = config.server.admin_token.as_deref() else {
         return Ok(());
     };
 

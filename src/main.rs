@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -26,6 +26,8 @@ use crucible::types::{
     BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
     TimeControl,
 };
+
+type SharedConfig = Arc<RwLock<Config>>;
 
 #[derive(Parser)]
 #[command(
@@ -132,6 +134,9 @@ enum Commands {
         /// Override training output directory
         #[arg(long)]
         output_dir: Option<PathBuf>,
+        /// Exact reported search depth to keep in the exported dataset
+        #[arg(long, alias = "min-depth")]
+        depth: Option<u32>,
     },
 
     /// Show test results and Elo timeline
@@ -162,6 +167,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
+    let shared_config: SharedConfig = Arc::new(RwLock::new(config.clone()));
 
     match cli.command {
         Commands::Init => {
@@ -179,8 +185,7 @@ async fn main() -> Result<()> {
             let web_storage = storage.clone();
             let web_host = config.server.web_host.clone();
             let web_port = config.server.web_port;
-            let web_config = config.clone();
-
+            let web_config = shared_config.clone();
             let _web_handle = tokio::spawn(async move {
                 let router = crucible::web::create_router(web_storage, web_config);
                 let addr = format!("{}:{}", web_host, web_port);
@@ -191,7 +196,7 @@ async fn main() -> Result<()> {
 
             // Start the main testing loop
             let main_storage = storage.clone();
-            let main_config = config.clone();
+            let main_config = shared_config.clone();
             let _test_handle = tokio::spawn(async move {
                 run_test_loop(main_storage, main_config).await;
             });
@@ -434,6 +439,7 @@ async fn main() -> Result<()> {
             revision,
             games,
             output_dir,
+            depth,
         } => {
             let storage = open_storage(&config)?;
             let engine = storage
@@ -467,6 +473,8 @@ async fn main() -> Result<()> {
                 hash_mb: config.testing.hash_mb,
                 threads: config.testing.engine_threads,
                 output_dir: output_dir.unwrap_or_else(|| config.training.output_dir.clone()),
+                depth: depth.unwrap_or(config.training.selfplay_depth),
+                kind: TrainingRunKind::SelfPlay,
             })?;
 
             println!("Generated self-play data for '{}'", engine.name);
@@ -516,9 +524,8 @@ fn default_export_path() -> PathBuf {
 }
 
 /// The main continuous testing loop
-async fn run_test_loop(storage: Storage, config: Config) {
+async fn run_test_loop(storage: Storage, shared_config: SharedConfig) {
     info!("Test loop started");
-    let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
     match storage.requeue_running_jobs() {
         Ok(0) => {}
         Ok(count) => warn!(
@@ -529,6 +536,8 @@ async fn run_test_loop(storage: Storage, config: Config) {
     }
 
     loop {
+        let config = current_config(&shared_config);
+        let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
         // 1. For each tracked engine, fetch latest commits
         let engines = match storage.get_engines() {
             Ok(e) => e,
@@ -603,6 +612,20 @@ async fn run_test_loop(storage: Storage, config: Config) {
                 }
             }
 
+            while workers.len() < worker_count
+                && config.training.idle_selfplay
+                && !has_pending_test_jobs(&storage)
+            {
+                let Some(task) = next_idle_selfplay_task(&storage, &config) else {
+                    break;
+                };
+                workers.spawn(async move {
+                    if let Err(err) = run_idle_selfplay_batch(task).await {
+                        tracing::error!("Idle self-play batch failed: {}", err);
+                    }
+                });
+            }
+
             if workers.is_empty() {
                 break;
             }
@@ -620,6 +643,13 @@ async fn run_test_loop(storage: Storage, config: Config) {
         ))
         .await;
     }
+}
+
+fn current_config(shared_config: &SharedConfig) -> Config {
+    shared_config
+        .read()
+        .expect("shared config poisoned")
+        .clone()
 }
 
 fn open_storage(config: &Config) -> Result<Storage> {
@@ -674,6 +704,69 @@ fn resolve_selfplay_revision(
                 engine.name
             )
         })
+}
+
+struct IdleSelfplayTask {
+    engine: Engine,
+    revision: crucible::types::EngineRevision,
+    config: Config,
+}
+
+fn has_pending_test_jobs(storage: &Storage) -> bool {
+    match storage.get_system_status() {
+        Ok(status) => status.queued_jobs > 0,
+        Err(_) => true,
+    }
+}
+
+fn next_idle_selfplay_task(storage: &Storage, config: &Config) -> Option<IdleSelfplayTask> {
+    let engines = storage.get_engines().ok()?;
+    let engine = engines.into_iter().next()?;
+    let revision = storage
+        .get_revisions_for_engine(&engine.id)
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|revision| revision.build_status == BuildStatus::Success)?;
+    Some(IdleSelfplayTask {
+        engine,
+        revision,
+        config: config.clone(),
+    })
+}
+
+async fn run_idle_selfplay_batch(task: IdleSelfplayTask) -> Result<()> {
+    let binary_path = task.revision.binary_path.clone().with_context(|| {
+        format!(
+            "Revision '{}' does not have a built binary",
+            task.revision.commit_hash
+        )
+    })?;
+
+    let summary = run_selfplay_data_generation(SelfPlayDataConfig {
+        engine_id: task.engine.id.clone(),
+        engine_name: task.engine.name.clone(),
+        revision_id: task.revision.id.clone(),
+        revision_hash: task.revision.commit_hash.clone(),
+        binary_path,
+        time_control: configured_time_control(&task.config),
+        opening_book: load_opening_book(task.config.testing.opening_book.as_deref())?,
+        games: task.config.training.idle_batch_games,
+        hash_mb: task.config.testing.hash_mb,
+        threads: task.config.testing.engine_threads,
+        output_dir: task.config.training.output_dir.clone(),
+        depth: task.config.training.selfplay_depth,
+        kind: TrainingRunKind::Idle,
+    })?;
+
+    info!(
+        "Completed idle self-play batch for '{}' at {}: {} games, {} samples",
+        task.engine.name,
+        short_hash(&task.revision.commit_hash),
+        summary.games_played,
+        summary.samples_written
+    );
+    Ok(())
 }
 
 async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
@@ -1052,6 +1145,8 @@ fn build_regression_training_exports(
             kind: TrainingRunKind::Regression,
             source_job_id: Some(job.id.clone()),
             source_role: Some("dev".to_string()),
+            depth_mode: crucible::training::TrainingDepthMode::Min,
+            depth_value: config.training.regression_min_depth,
         },
     )?;
     let base = TrainingRunWriter::begin(
@@ -1066,6 +1161,8 @@ fn build_regression_training_exports(
             kind: TrainingRunKind::Regression,
             source_job_id: Some(job.id.clone()),
             source_role: Some("base".to_string()),
+            depth_mode: crucible::training::TrainingDepthMode::Min,
+            depth_value: config.training.regression_min_depth,
         },
     )?;
     Ok(RegressionTrainingExports { dev, base })

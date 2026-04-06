@@ -108,6 +108,10 @@ poll_interval_seconds = 60 # how often the daemon checks for new commits/jobs
 output_dir = ".crucible/training"
 selfplay_games = 100
 collect_from_tests = true
+selfplay_depth = 10
+regression_min_depth = 10
+idle_selfplay = false
+idle_batch_games = 1
 
 [testing.time_control]
 base_ms = 10000            # 10+0.1 STC
@@ -134,7 +138,7 @@ Entries under `[[engines]]` are imported automatically when `crucible run` start
 `branches` entries can be exact names or wildcard patterns like `exp/*`, matched against remote `origin/...` branches.
 `experimental_branches` are tested normally, but the default Timeline and Jobs views keep them out of the canonical history and show them in the separate Experiments tab.
 For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
-If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it.
+If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it. Runtime config reload applies to future polling cycles, scheduling, idle self-play batches, and new jobs. Running jobs keep the settings they started with.
 
 ## Training Data
 
@@ -150,7 +154,7 @@ By default, Crucible uses the latest successfully built revision for that engine
 .crucible/training/<engine>/<revision>/<run-timestamp>/
 ```
 
-Each run is split into files like `depth-010.jsonl`, `depth-011.jsonl`, and so on, so you can decide later which depth bands are worth training on. Every row includes engine and revision metadata, the FEN, side to move, reported depth, score, chosen move, and final game result from that side's perspective.
+Each run is split into files like `depth-010.jsonl`, `depth-011.jsonl`, and so on. Dedicated self-play runs keep only positions reported at exactly `training.selfplay_depth`, so `selfplay_depth = 10` gives you D10 data. Regression/SPRT collection is separate: it keeps positions at or above `training.regression_min_depth`, so you can still harvest D10+ data from test matches. Every row includes engine and revision metadata, the FEN, side to move, reported depth, score, chosen move, and final game result from that side's perspective.
 
 To pin a specific revision or change the destination:
 
@@ -159,8 +163,11 @@ crucible selfplay-data \
   --engine Sykora \
   --revision eb640fa6 \
   --games 500 \
+  --depth 12 \
   --output-dir /data/nnue
 ```
+
+When `training.idle_selfplay = true`, Crucible uses spare worker slots for short self-play batches whenever there are no queued test jobs. That lets the server keep generating training data in the background instead of idling.
 
 ## Exporting Results
 
@@ -203,7 +210,7 @@ Published images go to `ghcr.io/sb2bg/crucible`.
 | `crucible export [--output <path>]`                       | Export results as JSON            |
 | `crucible bisect --engine <n> --good <hash> --bad <hash>` | Start a regression hunt           |
 | `crucible test --engine <n> --dev <hash> --base <hash>`   | Manual one-off test               |
-| `crucible selfplay-data --engine <n> [--revision <hash>]` | Export self-play training data    |
+| `crucible selfplay-data --engine <n> [--revision <hash>] [--depth <n>]` | Export self-play training data    |
 
 ## How It Works
 

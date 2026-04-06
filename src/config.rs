@@ -126,6 +126,14 @@ pub struct TrainingConfig {
     pub selfplay_games: u32,
     #[serde(default = "default_collect_from_tests")]
     pub collect_from_tests: bool,
+    #[serde(default = "default_training_min_depth", alias = "min_depth")]
+    pub regression_min_depth: u32,
+    #[serde(default = "default_training_selfplay_depth")]
+    pub selfplay_depth: u32,
+    #[serde(default)]
+    pub idle_selfplay: bool,
+    #[serde(default = "default_idle_batch_games")]
+    pub idle_batch_games: u32,
 }
 
 fn default_training_output_dir() -> PathBuf {
@@ -140,12 +148,28 @@ fn default_collect_from_tests() -> bool {
     true
 }
 
+fn default_training_min_depth() -> u32 {
+    10
+}
+
+fn default_training_selfplay_depth() -> u32 {
+    10
+}
+
+fn default_idle_batch_games() -> u32 {
+    1
+}
+
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             output_dir: default_training_output_dir(),
             selfplay_games: default_selfplay_games(),
             collect_from_tests: default_collect_from_tests(),
+            regression_min_depth: default_training_min_depth(),
+            selfplay_depth: default_training_selfplay_depth(),
+            idle_selfplay: false,
+            idle_batch_games: default_idle_batch_games(),
         }
     }
 }
@@ -252,9 +276,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
             let contents = std::fs::read_to_string(path)?;
-            let config: Config = toml::from_str(&contents)?;
-            config.validate()?;
-            Ok(config)
+            Self::parse(&contents)
         } else {
             let config = Config::default();
             config.validate()?;
@@ -262,10 +284,20 @@ impl Config {
         }
     }
 
+    pub fn parse(contents: &str) -> Result<Self> {
+        let config: Config = toml::from_str(contents)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
-        let contents = toml::to_string_pretty(self)?;
+        let contents = self.to_toml_string()?;
         std::fs::write(path, contents)?;
         Ok(())
+    }
+
+    pub fn to_toml_string(&self) -> Result<String> {
+        Ok(toml::to_string_pretty(self)?)
     }
 
     /// Generate an example config file
@@ -309,6 +341,15 @@ impl Config {
         }
         if self.training.selfplay_games == 0 {
             anyhow::bail!("training.selfplay_games must be at least 1");
+        }
+        if self.training.regression_min_depth == 0 {
+            anyhow::bail!("training.regression_min_depth must be at least 1");
+        }
+        if self.training.selfplay_depth == 0 {
+            anyhow::bail!("training.selfplay_depth must be at least 1");
+        }
+        if self.training.idle_batch_games == 0 {
+            anyhow::bail!("training.idle_batch_games must be at least 1");
         }
         if self.testing.time_control.base_ms == 0 && self.testing.time_control.nodes.is_none() {
             anyhow::bail!("time control must specify positive base_ms or nodes");

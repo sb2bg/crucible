@@ -27,6 +27,8 @@ pub struct SelfPlayDataConfig {
     pub hash_mb: u32,
     pub threads: u32,
     pub output_dir: PathBuf,
+    pub depth: u32,
+    pub kind: TrainingRunKind,
 }
 
 pub struct SelfPlayDataSummary {
@@ -41,6 +43,7 @@ pub struct SelfPlayDataSummary {
 pub enum TrainingRunKind {
     SelfPlay,
     Regression,
+    Idle,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +53,13 @@ pub enum TrainingRunStatus {
     Completed,
     Cancelled,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingDepthMode {
+    Exact,
+    Min,
 }
 
 impl Default for TrainingRunStatus {
@@ -80,6 +90,8 @@ pub struct TrainingRunDescriptor {
     pub kind: TrainingRunKind,
     pub source_job_id: Option<String>,
     pub source_role: Option<String>,
+    pub depth_mode: TrainingDepthMode,
+    pub depth_value: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +114,10 @@ pub struct TrainingRunSummary {
     pub source_job_id: Option<String>,
     #[serde(default)]
     pub source_role: Option<String>,
+    #[serde(default = "default_training_depth_mode")]
+    pub depth_mode: TrainingDepthMode,
+    #[serde(default = "default_training_depth_value_metadata", alias = "min_depth")]
+    pub depth_value: u32,
     pub run_dir: PathBuf,
 }
 
@@ -168,6 +184,10 @@ struct RunMetadata {
     source_job_id: Option<String>,
     #[serde(default)]
     source_role: Option<String>,
+    #[serde(default = "default_training_depth_mode")]
+    depth_mode: TrainingDepthMode,
+    #[serde(default = "default_training_depth_value_metadata", alias = "min_depth")]
+    depth_value: u32,
 }
 
 pub struct TrainingRunWriter {
@@ -178,6 +198,14 @@ pub struct TrainingRunWriter {
 
 fn default_training_run_kind() -> TrainingRunKind {
     TrainingRunKind::SelfPlay
+}
+
+fn default_training_depth_mode() -> TrainingDepthMode {
+    TrainingDepthMode::Min
+}
+
+fn default_training_depth_value_metadata() -> u32 {
+    1
 }
 
 impl TrainingRunWriter {
@@ -205,6 +233,8 @@ impl TrainingRunWriter {
             status: TrainingRunStatus::Running,
             source_job_id: descriptor.source_job_id,
             source_role: descriptor.source_role,
+            depth_mode: descriptor.depth_mode,
+            depth_value: descriptor.depth_value,
         };
         let writer = Self {
             run_dir,
@@ -247,6 +277,13 @@ impl TrainingRunWriter {
         let mut writers: HashMap<u32, BufWriter<std::fs::File>> = HashMap::new();
 
         for sample in samples {
+            let keep = match self.metadata.depth_mode {
+                TrainingDepthMode::Exact => sample.depth == self.metadata.depth_value,
+                TrainingDepthMode::Min => sample.depth >= self.metadata.depth_value,
+            };
+            if !keep {
+                continue;
+            }
             let entry = self
                 .metadata
                 .output_depth_counts
@@ -367,6 +404,8 @@ pub fn list_training_runs(base: &Path) -> Result<Vec<TrainingRunSummary>> {
                     status: run.status,
                     source_job_id: run.source_job_id,
                     source_role: run.source_role,
+                    depth_mode: run.depth_mode,
+                    depth_value: run.depth_value,
                     run_dir: run_entry.path(),
                 });
             }
@@ -396,37 +435,46 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
             revision_hash: config.revision_hash.clone(),
             time_control: config.time_control.to_string(),
             games_requested: Some(config.games),
-            kind: TrainingRunKind::SelfPlay,
+            kind: config.kind,
             source_job_id: None,
             source_role: None,
+            depth_mode: TrainingDepthMode::Exact,
+            depth_value: config.depth,
         },
     )?;
 
-    for (game_index, opening) in openings.iter().cycle().enumerate() {
-        if writer.games_played() >= config.games {
-            break;
+    let outcome = (|| -> Result<SelfPlayDataSummary> {
+        for (game_index, opening) in openings.iter().cycle().enumerate() {
+            if writer.games_played() >= config.games {
+                break;
+            }
+
+            let samples = play_selfplay_game(
+                &config.binary_path,
+                opening,
+                &config.time_control,
+                config.hash_mb,
+                config.threads,
+                (game_index as u32) + 1,
+            )?;
+            writer.record_game((game_index as u32) + 1)?;
+            writer.append_samples(&samples)?;
         }
 
-        let samples = play_selfplay_game(
-            &config.binary_path,
-            opening,
-            &config.time_control,
-            config.hash_mb,
-            config.threads,
-            (game_index as u32) + 1,
-        )?;
-        writer.record_game((game_index as u32) + 1)?;
-        writer.append_samples(&samples)?;
+        writer.set_status(TrainingRunStatus::Completed)?;
+
+        Ok(SelfPlayDataSummary {
+            run_dir: writer.run_dir().to_path_buf(),
+            games_played: writer.games_played(),
+            samples_written: writer.samples_written(),
+            depth_counts: writer.depth_counts().clone(),
+        })
+    })();
+
+    if outcome.is_err() {
+        let _ = writer.set_status(TrainingRunStatus::Failed);
     }
-
-    writer.set_status(TrainingRunStatus::Completed)?;
-
-    Ok(SelfPlayDataSummary {
-        run_dir: writer.run_dir().to_path_buf(),
-        games_played: writer.games_played(),
-        samples_written: writer.samples_written(),
-        depth_counts: writer.depth_counts().clone(),
-    })
+    outcome
 }
 
 fn prepare_run_dir(
@@ -446,6 +494,7 @@ fn prepare_run_dir(
             let role = source_role.unwrap_or("unknown");
             format!("regression-{}-{}", job, role)
         }
+        TrainingRunKind::Idle => "idle".to_string(),
     };
     let run_dir = base
         .join(sanitize_path_component(engine_name))
@@ -748,6 +797,8 @@ mod tests {
             status: TrainingRunStatus::Completed,
             source_job_id: None,
             source_role: None,
+            depth_mode: TrainingDepthMode::Exact,
+            depth_value: 10,
         };
         let newer = RunMetadata {
             engine_id: "engine-1".into(),
@@ -764,6 +815,8 @@ mod tests {
             status: TrainingRunStatus::Running,
             source_job_id: Some("job-1".into()),
             source_role: Some("dev".into()),
+            depth_mode: TrainingDepthMode::Min,
+            depth_value: 12,
         };
 
         fs::write(
@@ -792,6 +845,114 @@ mod tests {
     fn no_move_result_uses_board_side_to_move() -> Result<()> {
         let board = parse_opening_board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")?;
         assert_eq!(resolve_no_move_result(&board), GameResult::WhiteWin);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_filters_using_depth_mode() -> Result<()> {
+        let base =
+            std::env::temp_dir().join(format!("crucible-training-min-depth-{}", Uuid::new_v4()));
+        let mut writer = TrainingRunWriter::begin(
+            &base,
+            TrainingRunDescriptor {
+                engine_id: "engine-1".into(),
+                engine_name: "Sykora".into(),
+                revision_id: "rev-1".into(),
+                revision_hash: "abcd".into(),
+                time_control: "10+0.1".into(),
+                games_requested: Some(1),
+                kind: TrainingRunKind::SelfPlay,
+                source_job_id: None,
+                source_role: None,
+                depth_mode: TrainingDepthMode::Exact,
+                depth_value: 10,
+            },
+        )?;
+        writer.append_samples(&[
+            CollectedTrainingSample {
+                game_number: 1,
+                ply: 1,
+                opening: "startpos".into(),
+                fen: Board::default().to_string(),
+                side_to_move: Color::White,
+                depth: 9,
+                score: Some(SearchScore::Cp(12)),
+                bestmove: "e2e4".into(),
+                result: GameResult::WhiteWin,
+            },
+            CollectedTrainingSample {
+                game_number: 1,
+                ply: 2,
+                opening: "startpos".into(),
+                fen: Board::default().to_string(),
+                side_to_move: Color::Black,
+                depth: 10,
+                score: Some(SearchScore::Cp(18)),
+                bestmove: "e7e5".into(),
+                result: GameResult::BlackWin,
+            },
+        ])?;
+
+        assert_eq!(writer.samples_written(), 1);
+        assert_eq!(writer.depth_counts().get(&9), None);
+        assert_eq!(writer.depth_counts().get(&10), Some(&1));
+
+        let mut min_writer = TrainingRunWriter::begin(
+            &base,
+            TrainingRunDescriptor {
+                engine_id: "engine-1".into(),
+                engine_name: "Sykora".into(),
+                revision_id: "rev-2".into(),
+                revision_hash: "efgh".into(),
+                time_control: "10+0.1".into(),
+                games_requested: Some(1),
+                kind: TrainingRunKind::Regression,
+                source_job_id: Some("job-1".into()),
+                source_role: Some("dev".into()),
+                depth_mode: TrainingDepthMode::Min,
+                depth_value: 10,
+            },
+        )?;
+        min_writer.append_samples(&[
+            CollectedTrainingSample {
+                game_number: 1,
+                ply: 1,
+                opening: "startpos".into(),
+                fen: Board::default().to_string(),
+                side_to_move: Color::White,
+                depth: 9,
+                score: Some(SearchScore::Cp(12)),
+                bestmove: "e2e4".into(),
+                result: GameResult::WhiteWin,
+            },
+            CollectedTrainingSample {
+                game_number: 1,
+                ply: 2,
+                opening: "startpos".into(),
+                fen: Board::default().to_string(),
+                side_to_move: Color::Black,
+                depth: 10,
+                score: Some(SearchScore::Cp(18)),
+                bestmove: "e7e5".into(),
+                result: GameResult::BlackWin,
+            },
+            CollectedTrainingSample {
+                game_number: 1,
+                ply: 3,
+                opening: "startpos".into(),
+                fen: Board::default().to_string(),
+                side_to_move: Color::White,
+                depth: 12,
+                score: Some(SearchScore::Cp(20)),
+                bestmove: "g1f3".into(),
+                result: GameResult::WhiteWin,
+            },
+        ])?;
+        assert_eq!(min_writer.samples_written(), 2);
+        assert_eq!(min_writer.depth_counts().get(&10), Some(&1));
+        assert_eq!(min_writer.depth_counts().get(&12), Some(&1));
+
+        fs::remove_dir_all(base)?;
         Ok(())
     }
 }

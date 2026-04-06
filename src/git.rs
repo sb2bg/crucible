@@ -125,7 +125,7 @@ impl GitManager {
         let mut remote = repo
             .find_remote("origin")
             .context("No 'origin' remote found")?;
-        remote.fetch(&[] as &[&str], None, None)?;
+        remote.fetch(&["+refs/heads/*:refs/remotes/origin/*"], None, None)?;
         Ok(())
     }
 

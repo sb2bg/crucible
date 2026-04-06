@@ -945,7 +945,7 @@
     <div class="panel-head">
       <div>
         <h2 class="panel-title">Training</h2>
-        <p class="panel-subtitle">self-play export runs and sampled position counts by depth</p>
+        <p class="panel-subtitle">self-play, idle, and regression export runs with their recorded depth policy</p>
       </div>
       <button type="button" id="refresh-training">Refresh</button>
     </div>
@@ -1079,6 +1079,7 @@
         <div class="engine-admin-list" id="admin-engine-grid"></div>
         <div class="empty hidden" id="admin-engine-empty">No tracked engines.</div>
       </div>
+
     </div>
   </section>
 </div>
@@ -1749,11 +1750,17 @@
 
   function formatTrainingSource(run) {
     const kind = String(run.kind || 'selfplay');
+    const depthMode = String(run.depth_mode || 'min');
+    const depthValue = Number(run.depth_value || run.min_depth || 1);
+    const depthLabel = depthMode === 'exact' ? `d=${depthValue}` : `d>=${depthValue}`;
     if (kind === 'regression') {
       const role = run.source_role ? ` ${escapeHtml(run.source_role)}` : '';
-      return `regression${role}`;
+      return `regression${role} • ${depthLabel}`;
     }
-    return 'selfplay';
+    if (kind === 'idle') {
+      return `idle selfplay • ${depthLabel}`;
+    }
+    return `selfplay • ${depthLabel}`;
   }
 
   async function loadBisect() {

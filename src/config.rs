@@ -124,6 +124,8 @@ pub struct TrainingConfig {
     pub output_dir: PathBuf,
     #[serde(default = "default_selfplay_games")]
     pub selfplay_games: u32,
+    #[serde(default = "default_collect_from_tests")]
+    pub collect_from_tests: bool,
 }
 
 fn default_training_output_dir() -> PathBuf {
@@ -134,11 +136,16 @@ fn default_selfplay_games() -> u32 {
     100
 }
 
+fn default_collect_from_tests() -> bool {
+    true
+}
+
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             output_dir: default_training_output_dir(),
             selfplay_games: default_selfplay_games(),
+            collect_from_tests: default_collect_from_tests(),
         }
     }
 }

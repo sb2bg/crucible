@@ -9,13 +9,18 @@ use tracing_subscriber::EnvFilter;
 
 use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
 use crucible::config::Config;
-use crucible::engine::match_runner::{run_match, MatchConfig, MatchEvent};
+use crucible::engine::match_runner::{
+    run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
+};
 use crucible::git::{short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
 use crucible::sprt::{elo_error, los, wdl_to_elo};
 use crucible::storage::Storage;
-use crucible::training::{run_selfplay_data_generation, SelfPlayDataConfig};
+use crucible::training::{
+    run_selfplay_data_generation, SelfPlayDataConfig, TrainingRunDescriptor, TrainingRunKind,
+    TrainingRunStatus, TrainingRunWriter,
+};
 use crucible::types::{
     BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
     TimeControl,
@@ -757,6 +762,9 @@ fn sync_engine_revisions(
 }
 
 async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Result<TestResult> {
+    let engine = storage
+        .get_engine_by_id(&job.engine_id)?
+        .with_context(|| format!("Missing engine '{}'", job.engine_id))?;
     let dev_revision = storage
         .get_revision_by_id(&job.dev_revision_id)?
         .with_context(|| format!("Missing dev revision '{}'", job.dev_revision_id))?;
@@ -796,8 +804,25 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
     };
     let progress_storage = storage.clone();
     let progress_job_id = job.id.clone();
+    let training_exports = if config.training.collect_from_tests {
+        Some(build_regression_training_exports(
+            config,
+            &engine,
+            &dev_revision,
+            &base_revision,
+            job,
+        )?)
+    } else {
+        None
+    };
     let progress_task = tokio::spawn(async move {
-        persist_job_progress(progress_storage, progress_job_id, event_rx).await
+        persist_job_progress(
+            progress_storage,
+            progress_job_id,
+            event_rx,
+            training_exports,
+        )
+        .await
     });
     configured_sprt_bounds(config, job.job_type).validate()?;
     let result = run_match(
@@ -820,11 +845,24 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
     )
     .await;
     cancel_watch.abort();
-    match progress_task.await {
-        Ok(Ok(())) => {}
+    let mut training_exports = match progress_task.await {
+        Ok(Ok(exports)) => exports,
         Ok(Err(err)) => return Err(err),
         Err(err) => return Err(anyhow!("job progress task panicked: {}", err)),
-    }
+    };
+    match &result {
+        Ok(_) => {}
+        Err(err) if err.to_string().contains("match cancelled") => {
+            if let Some(exports) = training_exports.as_mut() {
+                exports.set_status(TrainingRunStatus::Cancelled)?;
+            }
+        }
+        Err(_) => {
+            if let Some(exports) = training_exports.as_mut() {
+                exports.set_status(TrainingRunStatus::Failed)?;
+            }
+        }
+    };
     result
 }
 
@@ -869,11 +907,20 @@ async fn persist_job_progress(
     storage: Storage,
     job_id: String,
     mut event_rx: mpsc::UnboundedReceiver<MatchEvent>,
-) -> Result<()> {
+    mut training_exports: Option<RegressionTrainingExports>,
+) -> Result<Option<RegressionTrainingExports>> {
     while let Some(event) = event_rx.recv().await {
         match event {
-            MatchEvent::GameCompleted { record, .. } => {
+            MatchEvent::GameCompleted {
+                record,
+                training_samples,
+                ..
+            } => {
                 storage.insert_game(&job_id, &record)?;
+                if let Some(exports) = training_exports.as_mut() {
+                    exports.record_game(record.game_number)?;
+                    exports.append_samples(training_samples)?;
+                }
             }
             MatchEvent::SprtUpdate {
                 wins,
@@ -892,13 +939,90 @@ async fn persist_job_progress(
                     llr_status,
                 )?;
             }
-            MatchEvent::GameStarted { .. }
-            | MatchEvent::MatchCompleted { .. }
-            | MatchEvent::Error { .. } => {}
+            MatchEvent::MatchCompleted { .. } => {
+                if let Some(exports) = training_exports.as_mut() {
+                    exports.set_status(TrainingRunStatus::Completed)?;
+                }
+            }
+            MatchEvent::GameStarted { .. } | MatchEvent::Error { .. } => {}
         }
     }
 
-    Ok(())
+    Ok(training_exports)
+}
+
+struct RegressionTrainingExports {
+    dev: TrainingRunWriter,
+    base: TrainingRunWriter,
+}
+
+impl RegressionTrainingExports {
+    fn record_game(&mut self, game_number: u32) -> Result<()> {
+        self.dev.record_game(game_number)?;
+        self.base.record_game(game_number)?;
+        Ok(())
+    }
+
+    fn append_samples(&mut self, samples: Vec<TaggedTrainingSample>) -> Result<()> {
+        let mut dev_samples = Vec::new();
+        let mut base_samples = Vec::new();
+
+        for sample in samples {
+            match sample.source {
+                TrainingSampleSource::Dev => dev_samples.push(sample.sample),
+                TrainingSampleSource::Base => base_samples.push(sample.sample),
+            }
+        }
+
+        self.dev.append_samples(&dev_samples)?;
+        self.base.append_samples(&base_samples)?;
+        Ok(())
+    }
+
+    fn set_status(&mut self, status: TrainingRunStatus) -> Result<()> {
+        self.dev.set_status(status)?;
+        self.base.set_status(status)?;
+        Ok(())
+    }
+}
+
+fn build_regression_training_exports(
+    config: &Config,
+    engine: &Engine,
+    dev_revision: &crucible::types::EngineRevision,
+    base_revision: &crucible::types::EngineRevision,
+    job: &TestJob,
+) -> Result<RegressionTrainingExports> {
+    let time_control = job.time_control.to_string();
+    let dev = TrainingRunWriter::begin(
+        &config.training.output_dir,
+        TrainingRunDescriptor {
+            engine_id: engine.id.clone(),
+            engine_name: engine.name.clone(),
+            revision_id: dev_revision.id.clone(),
+            revision_hash: dev_revision.commit_hash.clone(),
+            time_control: time_control.clone(),
+            games_requested: Some(config.testing.max_games),
+            kind: TrainingRunKind::Regression,
+            source_job_id: Some(job.id.clone()),
+            source_role: Some("dev".to_string()),
+        },
+    )?;
+    let base = TrainingRunWriter::begin(
+        &config.training.output_dir,
+        TrainingRunDescriptor {
+            engine_id: engine.id.clone(),
+            engine_name: engine.name.clone(),
+            revision_id: base_revision.id.clone(),
+            revision_hash: base_revision.commit_hash.clone(),
+            time_control,
+            games_requested: Some(config.testing.max_games),
+            kind: TrainingRunKind::Regression,
+            source_job_id: Some(job.id.clone()),
+            source_role: Some("base".to_string()),
+        },
+    )?;
+    Ok(RegressionTrainingExports { dev, base })
 }
 
 fn advance_bisect_after_job(

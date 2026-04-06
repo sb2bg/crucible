@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use cozy_chess::{util::parse_uci_move, Board, Color, GameStatus};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -36,18 +36,72 @@ pub struct SelfPlayDataSummary {
     pub depth_counts: BTreeMap<u32, usize>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingRunKind {
+    SelfPlay,
+    Regression,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingRunStatus {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl Default for TrainingRunStatus {
+    fn default() -> Self {
+        Self::Completed
+    }
+}
+
+impl std::fmt::Display for TrainingRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrainingRunStatus::Running => write!(f, "running"),
+            TrainingRunStatus::Completed => write!(f, "completed"),
+            TrainingRunStatus::Cancelled => write!(f, "cancelled"),
+            TrainingRunStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrainingRunDescriptor {
+    pub engine_id: String,
+    pub engine_name: String,
+    pub revision_id: String,
+    pub revision_hash: String,
+    pub time_control: String,
+    pub games_requested: Option<u32>,
+    pub kind: TrainingRunKind,
+    pub source_job_id: Option<String>,
+    pub source_role: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingRunSummary {
     pub engine_id: String,
     pub engine_name: String,
     pub revision_id: String,
     pub revision_hash: String,
-    pub games_requested: u32,
+    pub games_requested: Option<u32>,
     pub games_played: u32,
     pub samples_written: usize,
     pub time_control: String,
     pub output_depth_counts: BTreeMap<u32, usize>,
     pub created_at: String,
+    #[serde(default = "default_training_run_kind")]
+    pub kind: TrainingRunKind,
+    #[serde(default)]
+    pub status: TrainingRunStatus,
+    #[serde(default)]
+    pub source_job_id: Option<String>,
+    #[serde(default)]
+    pub source_role: Option<String>,
     pub run_dir: PathBuf,
 }
 
@@ -63,8 +117,21 @@ struct PendingSample {
     opening: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CollectedTrainingSample {
+    pub game_number: u32,
+    pub ply: u32,
+    pub opening: String,
+    pub fen: String,
+    pub side_to_move: Color,
+    pub depth: u32,
+    pub score: Option<SearchScore>,
+    pub bestmove: String,
+    pub result: GameResult,
+}
+
 #[derive(Debug, Clone, Serialize)]
-struct TrainingSample {
+struct PersistedTrainingSample {
     engine_id: String,
     engine_name: String,
     revision_id: String,
@@ -87,12 +154,171 @@ struct RunMetadata {
     engine_name: String,
     revision_id: String,
     revision_hash: String,
-    games_requested: u32,
+    games_requested: Option<u32>,
     games_played: u32,
     samples_written: usize,
     time_control: String,
     output_depth_counts: BTreeMap<u32, usize>,
     created_at: String,
+    #[serde(default = "default_training_run_kind")]
+    kind: TrainingRunKind,
+    #[serde(default)]
+    status: TrainingRunStatus,
+    #[serde(default)]
+    source_job_id: Option<String>,
+    #[serde(default)]
+    source_role: Option<String>,
+}
+
+pub struct TrainingRunWriter {
+    run_dir: PathBuf,
+    metadata: RunMetadata,
+    seen_games: BTreeSet<u32>,
+}
+
+fn default_training_run_kind() -> TrainingRunKind {
+    TrainingRunKind::SelfPlay
+}
+
+impl TrainingRunWriter {
+    pub fn begin(base: &Path, descriptor: TrainingRunDescriptor) -> Result<Self> {
+        let run_dir = prepare_run_dir(
+            base,
+            &descriptor.engine_name,
+            &descriptor.revision_hash,
+            descriptor.kind,
+            descriptor.source_job_id.as_deref(),
+            descriptor.source_role.as_deref(),
+        )?;
+        let metadata = RunMetadata {
+            engine_id: descriptor.engine_id,
+            engine_name: descriptor.engine_name,
+            revision_id: descriptor.revision_id,
+            revision_hash: descriptor.revision_hash,
+            games_requested: descriptor.games_requested,
+            games_played: 0,
+            samples_written: 0,
+            time_control: descriptor.time_control,
+            output_depth_counts: BTreeMap::new(),
+            created_at: Utc::now().to_rfc3339(),
+            kind: descriptor.kind,
+            status: TrainingRunStatus::Running,
+            source_job_id: descriptor.source_job_id,
+            source_role: descriptor.source_role,
+        };
+        let writer = Self {
+            run_dir,
+            metadata,
+            seen_games: BTreeSet::new(),
+        };
+        writer.write_metadata()?;
+        Ok(writer)
+    }
+
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    pub fn games_played(&self) -> u32 {
+        self.metadata.games_played
+    }
+
+    pub fn samples_written(&self) -> usize {
+        self.metadata.samples_written
+    }
+
+    pub fn depth_counts(&self) -> &BTreeMap<u32, usize> {
+        &self.metadata.output_depth_counts
+    }
+
+    pub fn record_game(&mut self, game_number: u32) -> Result<()> {
+        if self.seen_games.insert(game_number) {
+            self.metadata.games_played += 1;
+            self.write_metadata()?;
+        }
+        Ok(())
+    }
+
+    pub fn append_samples(&mut self, samples: &[CollectedTrainingSample]) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+
+        let mut writers: HashMap<u32, BufWriter<std::fs::File>> = HashMap::new();
+
+        for sample in samples {
+            let entry = self
+                .metadata
+                .output_depth_counts
+                .entry(sample.depth)
+                .or_insert(0);
+            *entry += 1;
+            self.metadata.samples_written += 1;
+
+            if !writers.contains_key(&sample.depth) {
+                let path = self
+                    .run_dir
+                    .join(format!("depth-{:03}.jsonl", sample.depth));
+                let file = OpenOptions::new().create(true).append(true).open(path)?;
+                writers.insert(sample.depth, BufWriter::new(file));
+            }
+            let writer = writers
+                .get_mut(&sample.depth)
+                .expect("writer inserted for depth bucket");
+
+            let (score_cp, score_mate) = match sample.score {
+                Some(SearchScore::Cp(value)) => (Some(value), None),
+                Some(SearchScore::Mate(value)) => (None, Some(value)),
+                None => (None, None),
+            };
+
+            let row = PersistedTrainingSample {
+                engine_id: self.metadata.engine_id.clone(),
+                engine_name: self.metadata.engine_name.clone(),
+                revision_id: self.metadata.revision_id.clone(),
+                revision_hash: self.metadata.revision_hash.clone(),
+                game_number: sample.game_number,
+                ply: sample.ply,
+                opening: sample.opening.clone(),
+                fen: sample.fen.clone(),
+                side_to_move: match sample.side_to_move {
+                    Color::White => "white".to_string(),
+                    Color::Black => "black".to_string(),
+                },
+                depth: sample.depth,
+                score_cp,
+                score_mate,
+                bestmove: sample.bestmove.clone(),
+                result: match sample.result {
+                    GameResult::WhiteWin => 1,
+                    GameResult::Draw => 0,
+                    GameResult::BlackWin => -1,
+                },
+            };
+            serde_json::to_writer(&mut *writer, &row)?;
+            writer.write_all(b"\n")?;
+        }
+
+        for writer in writers.values_mut() {
+            writer.flush()?;
+        }
+
+        self.write_metadata()?;
+        Ok(())
+    }
+
+    pub fn set_status(&mut self, status: TrainingRunStatus) -> Result<()> {
+        self.metadata.status = status;
+        self.write_metadata()
+    }
+
+    fn write_metadata(&self) -> Result<()> {
+        fs::write(
+            self.run_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&self.metadata)?,
+        )?;
+        Ok(())
+    }
 }
 
 pub fn list_training_runs(base: &Path) -> Result<Vec<TrainingRunSummary>> {
@@ -137,6 +363,10 @@ pub fn list_training_runs(base: &Path) -> Result<Vec<TrainingRunSummary>> {
                     time_control: run.time_control,
                     output_depth_counts: run.output_depth_counts,
                     created_at: run.created_at,
+                    kind: run.kind,
+                    status: run.status,
+                    source_job_id: run.source_job_id,
+                    source_role: run.source_role,
                     run_dir: run_entry.path(),
                 });
             }
@@ -157,20 +387,27 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
         .opening_book
         .clone()
         .unwrap_or_else(|| vec!["startpos".to_string()]);
-    let run_dir = prepare_run_dir(
+    let mut writer = TrainingRunWriter::begin(
         &config.output_dir,
-        &config.engine_name,
-        &config.revision_hash,
+        TrainingRunDescriptor {
+            engine_id: config.engine_id.clone(),
+            engine_name: config.engine_name.clone(),
+            revision_id: config.revision_id.clone(),
+            revision_hash: config.revision_hash.clone(),
+            time_control: config.time_control.to_string(),
+            games_requested: Some(config.games),
+            kind: TrainingRunKind::SelfPlay,
+            source_job_id: None,
+            source_role: None,
+        },
     )?;
-    let mut depth_counts = BTreeMap::new();
-    let mut games_played = 0;
 
     for (game_index, opening) in openings.iter().cycle().enumerate() {
-        if games_played >= config.games {
+        if writer.games_played() >= config.games {
             break;
         }
 
-        let pending_samples = play_selfplay_game(
+        let samples = play_selfplay_game(
             &config.binary_path,
             opening,
             &config.time_control,
@@ -178,42 +415,44 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
             config.threads,
             (game_index as u32) + 1,
         )?;
-        persist_samples(&run_dir, &config, pending_samples, &mut depth_counts)?;
-        games_played += 1;
+        writer.record_game((game_index as u32) + 1)?;
+        writer.append_samples(&samples)?;
     }
 
-    let samples_written = depth_counts.values().sum();
-    let metadata = RunMetadata {
-        engine_id: config.engine_id.clone(),
-        engine_name: config.engine_name.clone(),
-        revision_id: config.revision_id.clone(),
-        revision_hash: config.revision_hash.clone(),
-        games_requested: config.games,
-        games_played,
-        samples_written,
-        time_control: config.time_control.to_string(),
-        output_depth_counts: depth_counts.clone(),
-        created_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(
-        run_dir.join("metadata.json"),
-        serde_json::to_vec_pretty(&metadata)?,
-    )?;
+    writer.set_status(TrainingRunStatus::Completed)?;
 
     Ok(SelfPlayDataSummary {
-        run_dir,
-        games_played,
-        samples_written,
-        depth_counts,
+        run_dir: writer.run_dir().to_path_buf(),
+        games_played: writer.games_played(),
+        samples_written: writer.samples_written(),
+        depth_counts: writer.depth_counts().clone(),
     })
 }
 
-fn prepare_run_dir(base: &Path, engine_name: &str, revision_hash: &str) -> Result<PathBuf> {
+fn prepare_run_dir(
+    base: &Path,
+    engine_name: &str,
+    revision_hash: &str,
+    kind: TrainingRunKind,
+    source_job_id: Option<&str>,
+    source_role: Option<&str>,
+) -> Result<PathBuf> {
+    let prefix = match kind {
+        TrainingRunKind::SelfPlay => "selfplay".to_string(),
+        TrainingRunKind::Regression => {
+            let job = source_job_id
+                .map(|value| value.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "job".to_string());
+            let role = source_role.unwrap_or("unknown");
+            format!("regression-{}-{}", job, role)
+        }
+    };
     let run_dir = base
         .join(sanitize_path_component(engine_name))
         .join(revision_hash)
         .join(format!(
-            "{}-{}",
+            "{}-{}-{}",
+            prefix,
             Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
             Uuid::new_v4()
         ));
@@ -228,7 +467,7 @@ fn play_selfplay_game(
     hash_mb: u32,
     threads: u32,
     game_number: u32,
-) -> Result<Vec<(PendingSample, GameResult)>> {
+) -> Result<Vec<CollectedTrainingSample>> {
     let mut white = UciEngine::launch(binary_path, "white")?;
     let mut black = UciEngine::launch(binary_path, "black")?;
 
@@ -356,72 +595,18 @@ fn play_selfplay_game(
 
     Ok(pending
         .into_iter()
-        .map(|sample| {
-            let perspective = perspective_result(result, sample.side_to_move);
-            (sample, perspective)
-        })
-        .collect())
-}
-
-fn persist_samples(
-    run_dir: &Path,
-    config: &SelfPlayDataConfig,
-    samples: Vec<(PendingSample, GameResult)>,
-    depth_counts: &mut BTreeMap<u32, usize>,
-) -> Result<()> {
-    let mut writers: HashMap<u32, BufWriter<std::fs::File>> = HashMap::new();
-
-    for (sample, result) in samples {
-        let entry = depth_counts.entry(sample.depth).or_insert(0);
-        *entry += 1;
-
-        if !writers.contains_key(&sample.depth) {
-            let path = run_dir.join(format!("depth-{:03}.jsonl", sample.depth));
-            let file = OpenOptions::new().create(true).append(true).open(path)?;
-            writers.insert(sample.depth, BufWriter::new(file));
-        }
-        let writer = writers
-            .get_mut(&sample.depth)
-            .expect("writer inserted for depth bucket");
-
-        let (score_cp, score_mate) = match sample.score {
-            Some(SearchScore::Cp(value)) => (Some(value), None),
-            Some(SearchScore::Mate(value)) => (None, Some(value)),
-            None => (None, None),
-        };
-
-        let row = TrainingSample {
-            engine_id: config.engine_id.clone(),
-            engine_name: config.engine_name.clone(),
-            revision_id: config.revision_id.clone(),
-            revision_hash: config.revision_hash.clone(),
+        .map(|sample| CollectedTrainingSample {
             game_number: sample.game_number,
             ply: sample.ply,
             opening: sample.opening,
             fen: sample.fen,
-            side_to_move: match sample.side_to_move {
-                Color::White => "white".to_string(),
-                Color::Black => "black".to_string(),
-            },
+            side_to_move: sample.side_to_move,
             depth: sample.depth,
-            score_cp,
-            score_mate,
+            score: sample.score,
             bestmove: sample.bestmove,
-            result: match result {
-                GameResult::WhiteWin => 1,
-                GameResult::Draw => 0,
-                GameResult::BlackWin => -1,
-            },
-        };
-        serde_json::to_writer(&mut *writer, &row)?;
-        writer.write_all(b"\n")?;
-    }
-
-    for writer in writers.values_mut() {
-        writer.flush()?;
-    }
-
-    Ok(())
+            result: perspective_result(result, sample.side_to_move),
+        })
+        .collect())
 }
 
 fn parse_opening_board(opening: &str) -> Result<Board> {
@@ -518,8 +703,22 @@ mod tests {
     #[test]
     fn prepares_unique_run_dirs() -> Result<()> {
         let base = std::env::temp_dir().join(format!("crucible-training-test-{}", Uuid::new_v4()));
-        let first = prepare_run_dir(&base, "Sykora", "abcd")?;
-        let second = prepare_run_dir(&base, "Sykora", "abcd")?;
+        let first = prepare_run_dir(
+            &base,
+            "Sykora",
+            "abcd",
+            TrainingRunKind::SelfPlay,
+            None,
+            None,
+        )?;
+        let second = prepare_run_dir(
+            &base,
+            "Sykora",
+            "abcd",
+            TrainingRunKind::SelfPlay,
+            None,
+            None,
+        )?;
 
         assert_ne!(first, second);
         fs::remove_dir_all(base)?;
@@ -539,24 +738,32 @@ mod tests {
             engine_name: "Sykora".into(),
             revision_id: "rev-old".into(),
             revision_hash: "oldrev".into(),
-            games_requested: 10,
+            games_requested: Some(10),
             games_played: 8,
             samples_written: 100,
             time_control: "10+0.1".into(),
             output_depth_counts: BTreeMap::from([(10, 60), (11, 40)]),
             created_at: "2026-04-01T00:00:00Z".into(),
+            kind: TrainingRunKind::SelfPlay,
+            status: TrainingRunStatus::Completed,
+            source_job_id: None,
+            source_role: None,
         };
         let newer = RunMetadata {
             engine_id: "engine-1".into(),
             engine_name: "Sykora".into(),
             revision_id: "rev-new".into(),
             revision_hash: "newrev".into(),
-            games_requested: 12,
+            games_requested: Some(12),
             games_played: 12,
             samples_written: 140,
             time_control: "10+0.1".into(),
             output_depth_counts: BTreeMap::from([(11, 50), (12, 90)]),
             created_at: "2026-04-02T00:00:00Z".into(),
+            kind: TrainingRunKind::Regression,
+            status: TrainingRunStatus::Running,
+            source_job_id: Some("job-1".into()),
+            source_role: Some("dev".into()),
         };
 
         fs::write(
@@ -572,6 +779,8 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].revision_hash, "newrev");
         assert_eq!(runs[0].samples_written, 140);
+        assert_eq!(runs[0].kind, TrainingRunKind::Regression);
+        assert_eq!(runs[0].status, TrainingRunStatus::Running);
         assert_eq!(runs[1].revision_hash, "oldrev");
         assert_eq!(runs[1].output_depth_counts.get(&10), Some(&60));
 

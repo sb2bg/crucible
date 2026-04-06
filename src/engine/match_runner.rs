@@ -15,6 +15,7 @@ use tracing::{error, info};
 
 use crate::engine::uci::UciEngine;
 use crate::sprt::{self, SprtBounds};
+use crate::training::CollectedTrainingSample;
 use crate::types::*;
 
 const UCI_CLOCK_GRACE_MS: u64 = 1_000;
@@ -29,6 +30,7 @@ pub enum MatchEvent {
         game_number: u32,
         result: GameResult,
         record: GameRecord,
+        training_samples: Vec<TaggedTrainingSample>,
     },
     SprtUpdate {
         wins: u32,
@@ -42,6 +44,18 @@ pub enum MatchEvent {
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingSampleSource {
+    Dev,
+    Base,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaggedTrainingSample {
+    pub source: TrainingSampleSource,
+    pub sample: CollectedTrainingSample,
 }
 
 /// Configuration for a match between two engine versions
@@ -97,13 +111,14 @@ pub async fn run_match(
                 &config.time_control,
                 config.hash_mb,
                 config.threads,
+                game_number,
                 swap,
                 config.cancel_flag.clone(),
             )
             .await;
 
             match result {
-                Ok((game_result, pgn, move_count)) => {
+                Ok((game_result, pgn, move_count, training_samples)) => {
                     match game_result {
                         GameResult::WhiteWin if !swap => wins += 1,
                         GameResult::BlackWin if !swap => losses += 1,
@@ -127,6 +142,7 @@ pub async fn run_match(
                         game_number,
                         result: game_result,
                         record: event_record,
+                        training_samples,
                     });
                 }
                 Err(e) => {
@@ -200,9 +216,10 @@ async fn play_single_game(
     tc: &TimeControl,
     hash_mb: u32,
     threads: u32,
+    game_number: u32,
     swap_colors: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<(GameResult, String, u32)> {
+) -> Result<(GameResult, String, u32, Vec<TaggedTrainingSample>)> {
     // Run in a blocking thread since UCI I/O is synchronous
     let dev = dev_binary.to_path_buf();
     let base = base_binary.to_path_buf();
@@ -217,6 +234,7 @@ async fn play_single_game(
             &tc,
             hash_mb,
             threads,
+            game_number,
             swap_colors,
             cancel_flag,
         )
@@ -231,9 +249,10 @@ fn play_game_blocking(
     tc: &TimeControl,
     hash_mb: u32,
     threads: u32,
+    game_number: u32,
     swap_colors: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<(GameResult, String, u32)> {
+) -> Result<(GameResult, String, u32, Vec<TaggedTrainingSample>)> {
     let (white_bin, black_bin) = if swap_colors {
         (base_binary, dev_binary)
     } else {
@@ -259,6 +278,7 @@ fn play_game_blocking(
     let mut board = parse_opening_board(opening)?;
     let mut seen_positions = HashMap::new();
     record_position(&mut seen_positions, &board);
+    let mut pending_samples: Vec<PendingTaggedSample> = Vec::new();
 
     let position = if opening == "startpos" {
         "startpos".to_string()
@@ -272,7 +292,12 @@ fn play_game_blocking(
         }
         if move_count >= max_moves {
             // Adjudicate as draw
-            return Ok((GameResult::Draw, pgn_moves, move_count));
+            return Ok((
+                GameResult::Draw,
+                pgn_moves,
+                move_count,
+                finalize_training_samples(pending_samples, GameResult::Draw),
+            ));
         }
 
         let side_to_move = board.side_to_move();
@@ -291,7 +316,13 @@ fn play_game_blocking(
                         return Err(err);
                     }
                     error!("engine search failed: {}", err);
-                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
+                    let result = opponent_win(side_to_move);
+                    return Ok((
+                        result,
+                        pgn_moves,
+                        move_count,
+                        finalize_training_samples(pending_samples, result),
+                    ));
                 }
             }
         } else {
@@ -319,7 +350,12 @@ fn play_game_blocking(
                 } else {
                     GameResult::WhiteWin
                 };
-                return Ok((result, pgn_moves, move_count));
+                return Ok((
+                    result,
+                    pgn_moves,
+                    move_count,
+                    finalize_training_samples(pending_samples, result),
+                ));
             }
             match search {
                 Ok(outcome) => outcome,
@@ -328,30 +364,73 @@ fn play_game_blocking(
                         return Err(err);
                     }
                     error!("engine search failed: {}", err);
-                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
+                    let result = opponent_win(side_to_move);
+                    return Ok((
+                        result,
+                        pgn_moves,
+                        move_count,
+                        finalize_training_samples(pending_samples, result),
+                    ));
                 }
             }
         };
 
         let Some(mv) = search.bestmove else {
-            return Ok((resolve_no_move_result(&board), pgn_moves, move_count));
+            let result = resolve_no_move_result(&board);
+            return Ok((
+                result,
+                pgn_moves,
+                move_count,
+                finalize_training_samples(pending_samples, result),
+            ));
         };
 
         if mv != "(none)" && mv != "0000" {
             if !UciEngine::is_valid_move(&mv) {
                 error!("engine returned invalid move '{}'", mv);
-                return Ok((opponent_win(side_to_move), pgn_moves, move_count));
+                let result = opponent_win(side_to_move);
+                return Ok((
+                    result,
+                    pgn_moves,
+                    move_count,
+                    finalize_training_samples(pending_samples, result),
+                ));
             }
             let parsed_move = match parse_uci_move(&board, &mv) {
                 Ok(parsed_move) => parsed_move,
                 Err(_) => {
                     error!("engine returned unparsable move '{}'", mv);
-                    return Ok((opponent_win(side_to_move), pgn_moves, move_count));
+                    let result = opponent_win(side_to_move);
+                    return Ok((
+                        result,
+                        pgn_moves,
+                        move_count,
+                        finalize_training_samples(pending_samples, result),
+                    ));
                 }
             };
             if !board.is_legal(parsed_move) {
                 error!("engine returned illegal move '{}'", mv);
-                return Ok((opponent_win(side_to_move), pgn_moves, move_count));
+                let result = opponent_win(side_to_move);
+                return Ok((
+                    result,
+                    pgn_moves,
+                    move_count,
+                    finalize_training_samples(pending_samples, result),
+                ));
+            }
+            if let Some(info) = search.info {
+                pending_samples.push(PendingTaggedSample {
+                    source: sample_source(is_white_turn, swap_colors),
+                    game_number,
+                    ply: move_count,
+                    fen: board.to_string(),
+                    side_to_move,
+                    depth: info.depth,
+                    score: info.score,
+                    bestmove: mv.clone(),
+                    opening: opening.to_string(),
+                });
             }
             if !pgn_moves.is_empty() {
                 pgn_moves.push(' ');
@@ -377,7 +456,12 @@ fn play_game_blocking(
             }
 
             if record_position(&mut seen_positions, &board) >= 3 {
-                return Ok((GameResult::Draw, pgn_moves, move_count));
+                return Ok((
+                    GameResult::Draw,
+                    pgn_moves,
+                    move_count,
+                    finalize_training_samples(pending_samples, GameResult::Draw),
+                ));
             }
 
             match board.status() {
@@ -387,17 +471,77 @@ fn play_game_blocking(
                     } else {
                         GameResult::BlackWin
                     };
-                    return Ok((result, pgn_moves, move_count));
+                    return Ok((
+                        result,
+                        pgn_moves,
+                        move_count,
+                        finalize_training_samples(pending_samples, result),
+                    ));
                 }
                 GameStatus::Drawn => {
-                    return Ok((GameResult::Draw, pgn_moves, move_count));
+                    return Ok((
+                        GameResult::Draw,
+                        pgn_moves,
+                        move_count,
+                        finalize_training_samples(pending_samples, GameResult::Draw),
+                    ));
                 }
                 GameStatus::Ongoing => {}
             }
         } else {
-            return Ok((resolve_no_move_result(&board), pgn_moves, move_count));
+            let result = resolve_no_move_result(&board);
+            return Ok((
+                result,
+                pgn_moves,
+                move_count,
+                finalize_training_samples(pending_samples, result),
+            ));
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingTaggedSample {
+    source: TrainingSampleSource,
+    game_number: u32,
+    ply: u32,
+    opening: String,
+    fen: String,
+    side_to_move: Color,
+    depth: u32,
+    score: Option<crate::engine::uci::SearchScore>,
+    bestmove: String,
+}
+
+fn sample_source(is_white_turn: bool, swap_colors: bool) -> TrainingSampleSource {
+    if swap_colors == is_white_turn {
+        TrainingSampleSource::Base
+    } else {
+        TrainingSampleSource::Dev
+    }
+}
+
+fn finalize_training_samples(
+    samples: Vec<PendingTaggedSample>,
+    result: GameResult,
+) -> Vec<TaggedTrainingSample> {
+    samples
+        .into_iter()
+        .map(|sample| TaggedTrainingSample {
+            source: sample.source,
+            sample: CollectedTrainingSample {
+                game_number: sample.game_number,
+                ply: sample.ply,
+                opening: sample.opening,
+                fen: sample.fen,
+                side_to_move: sample.side_to_move,
+                depth: sample.depth,
+                score: sample.score,
+                bestmove: sample.bestmove,
+                result: perspective_result(result, sample.side_to_move),
+            },
+        })
+        .collect()
 }
 
 fn parse_opening_board(opening: &str) -> Result<Board> {
@@ -440,6 +584,16 @@ fn record_position(seen_positions: &mut HashMap<u64, u8>, board: &Board) -> u8 {
     let entry = seen_positions.entry(board.hash()).or_insert(0);
     *entry = entry.saturating_add(1);
     *entry
+}
+
+fn perspective_result(result: GameResult, side_to_move: Color) -> GameResult {
+    match (result, side_to_move) {
+        (GameResult::Draw, _) => GameResult::Draw,
+        (GameResult::WhiteWin, Color::White) => GameResult::WhiteWin,
+        (GameResult::WhiteWin, Color::Black) => GameResult::BlackWin,
+        (GameResult::BlackWin, Color::White) => GameResult::BlackWin,
+        (GameResult::BlackWin, Color::Black) => GameResult::WhiteWin,
+    }
 }
 
 #[cfg(test)]

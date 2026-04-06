@@ -909,6 +909,8 @@
         <thead>
           <tr>
             <th>Created</th>
+            <th>Status</th>
+            <th>Source</th>
             <th>Engine</th>
             <th>Revision</th>
             <th>Games</th>
@@ -1608,9 +1610,11 @@
       body.innerHTML = runs.map(run => `
         <tr>
           <td title="${escapeHtml(run.created_at)}">${timeAgo(run.created_at)}</td>
+          <td><span class="badge badge-${escapeHtml((run.status || 'completed').toLowerCase())}">${escapeHtml(run.status || 'completed')}</span></td>
+          <td>${formatTrainingSource(run)}</td>
           <td>${escapeHtml(run.engine_name)}</td>
           <td class="mono">${escapeHtml((run.revision_hash || '').slice(0, 8))}</td>
-          <td class="mono">${Number(run.games_played || 0).toLocaleString()} / ${Number(run.games_requested || 0).toLocaleString()}</td>
+          <td class="mono">${formatTrainingGames(run)}</td>
           <td class="mono">${Number(run.samples_written || 0).toLocaleString()}</td>
           <td>${renderDepthBuckets(run.output_depth_counts || {})}</td>
           <td class="mono">${escapeHtml(run.run_dir || '')}</td>
@@ -1629,6 +1633,21 @@
     return entries
       .map(([depth, count]) => `<span class="tag mono">d${String(depth).padStart(2, '0')}: ${count.toLocaleString()}</span>`)
       .join(' ');
+  }
+
+  function formatTrainingGames(run) {
+    const played = Number(run.games_played || 0).toLocaleString();
+    if (run.games_requested == null) return played;
+    return `${played} / ${Number(run.games_requested || 0).toLocaleString()}`;
+  }
+
+  function formatTrainingSource(run) {
+    const kind = String(run.kind || 'selfplay');
+    if (kind === 'regression') {
+      const role = run.source_role ? ` ${escapeHtml(run.source_role)}` : '';
+      return `regression${role}`;
+    }
+    return 'selfplay';
   }
 
   async function loadBisect() {

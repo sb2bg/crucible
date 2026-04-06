@@ -107,6 +107,7 @@ poll_interval_seconds = 60 # how often the daemon checks for new commits/jobs
 [training]
 output_dir = ".crucible/training"
 selfplay_games = 100
+collect_from_tests = true
 
 [testing.time_control]
 base_ms = 10000            # 10+0.1 STC
@@ -166,7 +167,7 @@ GitHub Actions now includes a workflow that:
 - builds the Docker image on pull requests
 - publishes the image to GHCR on pushes to `main` and version tags
 
-Published images go to `ghcr.io/<your-github-username>/crucible`.
+Published images go to `ghcr.io/sb2bg/crucible`.
 
 ## Commands
 

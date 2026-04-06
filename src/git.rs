@@ -8,7 +8,7 @@ use git2::{BranchType, Delta, DiffFormat, Oid, Repository, Sort};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::types::*;
 
@@ -129,6 +129,47 @@ impl GitManager {
         Ok(())
     }
 
+    pub fn resolve_branch_patterns(
+        &self,
+        repo: &Repository,
+        configured: &[String],
+    ) -> Result<Vec<String>> {
+        let remote_branches = self.remote_branch_names(repo)?;
+        let mut resolved = Vec::new();
+
+        for pattern in configured {
+            let pattern = pattern.trim();
+            if pattern.is_empty() {
+                continue;
+            }
+
+            if has_branch_wildcard(pattern) {
+                let mut matches = remote_branches
+                    .iter()
+                    .filter(|branch| branch_pattern_matches(pattern, branch))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                matches.sort();
+                matches.dedup();
+
+                if matches.is_empty() {
+                    warn!("Branch pattern '{}' matched no remote branches", pattern);
+                }
+
+                resolved.extend(matches);
+            } else {
+                if !remote_branches.iter().any(|branch| branch == pattern) {
+                    anyhow::bail!("Branch 'origin/{}' not found", pattern);
+                }
+                resolved.push(pattern.to_string());
+            }
+        }
+
+        resolved.sort();
+        resolved.dedup();
+        Ok(resolved)
+    }
+
     /// Enumerate all commits on a branch, ordered oldest-first
     pub fn list_commits(
         &self,
@@ -233,6 +274,26 @@ impl GitManager {
             true
         })?;
         Ok(tags)
+    }
+
+    fn remote_branch_names(&self, repo: &Repository) -> Result<Vec<String>> {
+        let mut branches = Vec::new();
+        for branch in repo.branches(Some(BranchType::Remote))? {
+            let (branch, _) = branch?;
+            let Some(name) = branch.name()? else {
+                continue;
+            };
+            if name == "origin/HEAD" {
+                continue;
+            }
+            let Some(stripped) = name.strip_prefix("origin/") else {
+                continue;
+            };
+            branches.push(stripped.to_string());
+        }
+        branches.sort();
+        branches.dedup();
+        Ok(branches)
     }
 
     /// Checkout a specific commit and build the engine
@@ -433,4 +494,44 @@ impl GitManager {
         let commit = repo.find_commit(oid)?;
         Ok(commit.tree()?)
     }
+}
+
+fn has_branch_wildcard(pattern: &str) -> bool {
+    pattern.contains('*')
+}
+
+fn branch_pattern_matches(pattern: &str, candidate: &str) -> bool {
+    if !has_branch_wildcard(pattern) {
+        return pattern == candidate;
+    }
+
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    let mut remainder = candidate;
+    let mut anchored_start = true;
+
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            anchored_start = false;
+            continue;
+        }
+
+        if index == 0 && anchored_start {
+            let Some(stripped) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = stripped;
+            continue;
+        }
+
+        if index == parts.len() - 1 {
+            return remainder.ends_with(part);
+        }
+
+        let Some(position) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[position + part.len()..];
+    }
+
+    pattern.ends_with('*') || remainder.is_empty()
 }

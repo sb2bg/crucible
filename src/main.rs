@@ -742,7 +742,8 @@ fn sync_engine_revisions(
     git_mgr: &GitManager,
     repo: &git2::Repository,
 ) -> Result<()> {
-    for branch in &engine.branches {
+    let branches = git_mgr.resolve_branch_patterns(repo, &engine.branches)?;
+    for branch in &branches {
         let revisions =
             git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;
         info!(

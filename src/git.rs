@@ -500,7 +500,7 @@ fn has_branch_wildcard(pattern: &str) -> bool {
     pattern.contains('*')
 }
 
-fn branch_pattern_matches(pattern: &str, candidate: &str) -> bool {
+pub fn branch_pattern_matches(pattern: &str, candidate: &str) -> bool {
     if !has_branch_wildcard(pattern) {
         return pattern == candidate;
     }

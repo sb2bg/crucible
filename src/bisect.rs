@@ -208,6 +208,7 @@ impl BisectRunner {
             engine_id: engine_id.to_string(),
             dev_revision_id: test_revision_id.to_string(),
             base_revision_id: baseline_revision_id.to_string(),
+            branch_context: None,
             time_control: tc,
             opening_book: None,
             status: TestStatus::Queued,

@@ -123,7 +123,8 @@ min_games = 16             # don't let SPRT conclude on tiny samples
 [[engines]]
 name = "my-engine"
 repo = "https://github.com/you/your-engine"
-branches = ["main", "exp/*"]
+branches = ["main", "release/*"]
+experimental_branches = ["exp/*"]
 build_cmd = "make"
 binary_path = "my-engine"
 start_from = "v1.0.0"
@@ -131,6 +132,7 @@ start_from = "v1.0.0"
 
 Entries under `[[engines]]` are imported automatically when `crucible run` starts.
 `branches` entries can be exact names or wildcard patterns like `exp/*`, matched against remote `origin/...` branches.
+`experimental_branches` are tested normally, but the default Timeline and Jobs views keep them out of the canonical history and show them in the separate Experiments tab.
 For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
 If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it.
 

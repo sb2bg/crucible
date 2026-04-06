@@ -65,6 +65,7 @@ impl Storage {
                 repo_url TEXT NOT NULL,
                 local_path TEXT NOT NULL,
                 branches TEXT NOT NULL,  -- JSON array
+                experimental_branches TEXT NOT NULL DEFAULT '[]',  -- JSON array
                 build_cmd TEXT NOT NULL,
                 binary_path TEXT NOT NULL,
                 start_from TEXT
@@ -96,6 +97,7 @@ impl Storage {
                 engine_id TEXT NOT NULL REFERENCES engines(id),
                 dev_revision_id TEXT NOT NULL REFERENCES revisions(id),
                 base_revision_id TEXT NOT NULL REFERENCES revisions(id),
+                branch_context TEXT,
                 time_control TEXT NOT NULL,  -- JSON
                 opening_book TEXT,
                 status TEXT NOT NULL DEFAULT 'Queued',
@@ -161,7 +163,9 @@ impl Storage {
         self.ensure_bisect_column(&tx, "probe_history", "TEXT NOT NULL DEFAULT '[]'")?;
         self.ensure_bisect_column(&tx, "candidate_revision_id", "TEXT")?;
         self.ensure_bisect_column(&tx, "candidate_index", "INTEGER")?;
+        self.ensure_engine_column(&tx, "experimental_branches", "TEXT NOT NULL DEFAULT '[]'")?;
         self.ensure_revision_column(&tx, "binary_fingerprint", "TEXT")?;
+        self.ensure_test_job_column(&tx, "branch_context", "TEXT")?;
         self.ensure_games_column(&tx, "created_at", "TEXT")?;
         tx.execute_batch(
             "
@@ -239,6 +243,50 @@ impl Storage {
         Ok(())
     }
 
+    fn ensure_engine_column(
+        &self,
+        conn: &Connection,
+        column_name: &str,
+        column_sql: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(engines)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == column_name) {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE engines ADD COLUMN {} {}",
+                    column_name, column_sql
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_test_job_column(
+        &self,
+        conn: &Connection,
+        column_name: &str,
+        column_sql: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(test_jobs)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == column_name) {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE test_jobs ADD COLUMN {} {}",
+                    column_name, column_sql
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
     fn ensure_games_column(
         &self,
         conn: &Connection,
@@ -266,14 +314,15 @@ impl Storage {
     pub fn insert_engine(&self, engine: &Engine) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO engines (id, name, repo_url, local_path, branches, build_cmd, binary_path, start_from)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO engines (id, name, repo_url, local_path, branches, experimental_branches, build_cmd, binary_path, start_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 engine.id,
                 engine.name,
                 engine.repo_url,
                 engine.local_path.to_string_lossy().to_string(),
                 serde_json::to_string(&engine.branches)?,
+                serde_json::to_string(&engine.experimental_branches)?,
                 engine.build_cmd,
                 engine.binary_path,
                 engine.start_from,
@@ -288,6 +337,7 @@ impl Storage {
         let engines = stmt
             .query_map([], |row| {
                 let branches_str: String = row.get(4)?;
+                let experimental_branches_str: String = row.get(5)?;
                 let local_path_str: String = row.get(3)?;
                 Ok(Engine {
                     id: row.get(0)?,
@@ -295,9 +345,11 @@ impl Storage {
                     repo_url: row.get(2)?,
                     local_path: std::path::PathBuf::from(local_path_str),
                     branches: serde_json::from_str(&branches_str).unwrap_or_default(),
-                    build_cmd: row.get(5)?,
-                    binary_path: row.get(6)?,
-                    start_from: row.get(7)?,
+                    experimental_branches: serde_json::from_str(&experimental_branches_str)
+                        .unwrap_or_default(),
+                    build_cmd: row.get(6)?,
+                    binary_path: row.get(7)?,
+                    start_from: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -307,13 +359,14 @@ impl Storage {
     pub fn get_engine_by_name(&self, name: &str) -> Result<Option<Engine>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, repo_url, local_path, branches, build_cmd, binary_path, start_from
+            "SELECT id, name, repo_url, local_path, branches, experimental_branches, build_cmd, binary_path, start_from
              FROM engines WHERE name = ?1 LIMIT 1",
         )?;
 
         let engine = stmt
             .query_row(params![name], |row| {
                 let branches_str: String = row.get(4)?;
+                let experimental_branches_str: String = row.get(5)?;
                 let local_path_str: String = row.get(3)?;
                 Ok(Engine {
                     id: row.get(0)?,
@@ -321,9 +374,11 @@ impl Storage {
                     repo_url: row.get(2)?,
                     local_path: std::path::PathBuf::from(local_path_str),
                     branches: serde_json::from_str(&branches_str).unwrap_or_default(),
-                    build_cmd: row.get(5)?,
-                    binary_path: row.get(6)?,
-                    start_from: row.get(7)?,
+                    experimental_branches: serde_json::from_str(&experimental_branches_str)
+                        .unwrap_or_default(),
+                    build_cmd: row.get(6)?,
+                    binary_path: row.get(7)?,
+                    start_from: row.get(8)?,
                 })
             })
             .optional()?;
@@ -334,13 +389,14 @@ impl Storage {
     pub fn get_engine_by_id(&self, engine_id: &str) -> Result<Option<Engine>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, repo_url, local_path, branches, build_cmd, binary_path, start_from
+            "SELECT id, name, repo_url, local_path, branches, experimental_branches, build_cmd, binary_path, start_from
              FROM engines WHERE id = ?1 LIMIT 1",
         )?;
 
         let engine = stmt
             .query_row(params![engine_id], |row| {
                 let branches_str: String = row.get(4)?;
+                let experimental_branches_str: String = row.get(5)?;
                 let local_path_str: String = row.get(3)?;
                 Ok(Engine {
                     id: row.get(0)?,
@@ -348,9 +404,11 @@ impl Storage {
                     repo_url: row.get(2)?,
                     local_path: std::path::PathBuf::from(local_path_str),
                     branches: serde_json::from_str(&branches_str).unwrap_or_default(),
-                    build_cmd: row.get(5)?,
-                    binary_path: row.get(6)?,
-                    start_from: row.get(7)?,
+                    experimental_branches: serde_json::from_str(&experimental_branches_str)
+                        .unwrap_or_default(),
+                    build_cmd: row.get(6)?,
+                    binary_path: row.get(7)?,
+                    start_from: row.get(8)?,
                 })
             })
             .optional()?;
@@ -430,6 +488,20 @@ impl Storage {
             .query_map(params![engine_id], map_revision_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(revs)
+    }
+
+    pub fn get_revision_branches(&self, revision_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT branch
+             FROM revision_branches
+             WHERE revision_id = ?1
+             ORDER BY branch ASC",
+        )?;
+        let branches = stmt
+            .query_map(params![revision_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(branches)
     }
 
     pub fn get_revision_by_id(&self, revision_id: &str) -> Result<Option<EngineRevision>> {
@@ -578,13 +650,14 @@ impl Storage {
     pub fn insert_test_job(&self, job: &TestJob) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO test_jobs (id, engine_id, dev_revision_id, base_revision_id, time_control, opening_book, status, priority, job_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO test_jobs (id, engine_id, dev_revision_id, base_revision_id, branch_context, time_control, opening_book, status, priority, job_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 job.id,
                 job.engine_id,
                 job.dev_revision_id,
                 job.base_revision_id,
+                job.branch_context,
                 serde_json::to_string(&job.time_control)?,
                 job.opening_book,
                 encode_test_status(job.status),
@@ -625,7 +698,7 @@ impl Storage {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut stmt = tx.prepare(
-            "SELECT id, engine_id, dev_revision_id, base_revision_id, time_control, opening_book, status, priority, job_type, created_at, started_at, completed_at
+            "SELECT id, engine_id, dev_revision_id, base_revision_id, branch_context, time_control, opening_book, status, priority, job_type, created_at, started_at, completed_at
              FROM test_jobs
              WHERE status = ?1
              ORDER BY priority DESC, created_at ASC
@@ -820,6 +893,7 @@ impl Storage {
                 dev.commit_hash,
                 j.base_revision_id,
                 base.commit_hash,
+                j.branch_context,
                 j.status,
                 j.priority,
                 j.job_type,
@@ -843,12 +917,12 @@ impl Storage {
 
         let jobs = stmt
             .query_map(params![limit as i64], |row| {
-                let status_str: String = row.get(7)?;
-                let job_type_str: String = row.get(9)?;
-                let created_at: String = row.get(10)?;
-                let started_at: Option<String> = row.get(11)?;
-                let completed_at: Option<String> = row.get(12)?;
-                let sprt_result: Option<String> = row.get(19)?;
+                let status_str: String = row.get(8)?;
+                let job_type_str: String = row.get(10)?;
+                let created_at: String = row.get(11)?;
+                let started_at: Option<String> = row.get(12)?;
+                let completed_at: Option<String> = row.get(13)?;
+                let sprt_result: Option<String> = row.get(20)?;
                 Ok(JobSummary {
                     id: row.get(0)?,
                     engine_id: row.get(1)?,
@@ -857,18 +931,19 @@ impl Storage {
                     dev_commit_hash: row.get(4)?,
                     base_revision_id: row.get(5)?,
                     base_commit_hash: row.get(6)?,
+                    branch_context: row.get(7)?,
                     status: decode_test_status(&status_str)?,
-                    priority: row.get(8)?,
+                    priority: row.get(9)?,
                     job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 10)?,
-                    started_at: parse_optional_timestamp_column(started_at, 11)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
-                    wins: row.get(13)?,
-                    losses: row.get(14)?,
-                    draws: row.get(15)?,
-                    elo_diff: row.get(16)?,
-                    elo_error: row.get(17)?,
-                    los: row.get(18)?,
+                    created_at: parse_timestamp_column(&created_at, 11)?,
+                    started_at: parse_optional_timestamp_column(started_at, 12)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
+                    wins: row.get(14)?,
+                    losses: row.get(15)?,
+                    draws: row.get(16)?,
+                    elo_diff: row.get(17)?,
+                    elo_error: row.get(18)?,
+                    los: row.get(19)?,
                     sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
                 })
             })?
@@ -888,6 +963,7 @@ impl Storage {
                 dev.commit_hash,
                 j.base_revision_id,
                 base.commit_hash,
+                j.branch_context,
                 j.status,
                 j.priority,
                 j.job_type,
@@ -910,12 +986,12 @@ impl Storage {
 
         let jobs = stmt
             .query_map([], |row| {
-                let status_str: String = row.get(7)?;
-                let job_type_str: String = row.get(9)?;
-                let created_at: String = row.get(10)?;
-                let started_at: Option<String> = row.get(11)?;
-                let completed_at: Option<String> = row.get(12)?;
-                let sprt_result: Option<String> = row.get(19)?;
+                let status_str: String = row.get(8)?;
+                let job_type_str: String = row.get(10)?;
+                let created_at: String = row.get(11)?;
+                let started_at: Option<String> = row.get(12)?;
+                let completed_at: Option<String> = row.get(13)?;
+                let sprt_result: Option<String> = row.get(20)?;
                 Ok(JobSummary {
                     id: row.get(0)?,
                     engine_id: row.get(1)?,
@@ -924,18 +1000,19 @@ impl Storage {
                     dev_commit_hash: row.get(4)?,
                     base_revision_id: row.get(5)?,
                     base_commit_hash: row.get(6)?,
+                    branch_context: row.get(7)?,
                     status: decode_test_status(&status_str)?,
-                    priority: row.get(8)?,
+                    priority: row.get(9)?,
                     job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 10)?,
-                    started_at: parse_optional_timestamp_column(started_at, 11)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
-                    wins: row.get(13)?,
-                    losses: row.get(14)?,
-                    draws: row.get(15)?,
-                    elo_diff: row.get(16)?,
-                    elo_error: row.get(17)?,
-                    los: row.get(18)?,
+                    created_at: parse_timestamp_column(&created_at, 11)?,
+                    started_at: parse_optional_timestamp_column(started_at, 12)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
+                    wins: row.get(14)?,
+                    losses: row.get(15)?,
+                    draws: row.get(16)?,
+                    elo_diff: row.get(17)?,
+                    elo_error: row.get(18)?,
+                    los: row.get(19)?,
                     sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
                 })
             })?
@@ -959,6 +1036,7 @@ impl Storage {
                 dev.commit_hash,
                 j.base_revision_id,
                 base.commit_hash,
+                j.branch_context,
                 j.status,
                 j.priority,
                 j.job_type,
@@ -983,12 +1061,12 @@ impl Storage {
 
         let jobs = stmt
             .query_map(params![revision_id, limit as i64], |row| {
-                let status_str: String = row.get(7)?;
-                let job_type_str: String = row.get(9)?;
-                let created_at: String = row.get(10)?;
-                let started_at: Option<String> = row.get(11)?;
-                let completed_at: Option<String> = row.get(12)?;
-                let sprt_result: Option<String> = row.get(19)?;
+                let status_str: String = row.get(8)?;
+                let job_type_str: String = row.get(10)?;
+                let created_at: String = row.get(11)?;
+                let started_at: Option<String> = row.get(12)?;
+                let completed_at: Option<String> = row.get(13)?;
+                let sprt_result: Option<String> = row.get(20)?;
                 Ok(JobSummary {
                     id: row.get(0)?,
                     engine_id: row.get(1)?,
@@ -997,18 +1075,19 @@ impl Storage {
                     dev_commit_hash: row.get(4)?,
                     base_revision_id: row.get(5)?,
                     base_commit_hash: row.get(6)?,
+                    branch_context: row.get(7)?,
                     status: decode_test_status(&status_str)?,
-                    priority: row.get(8)?,
+                    priority: row.get(9)?,
                     job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 10)?,
-                    started_at: parse_optional_timestamp_column(started_at, 11)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
-                    wins: row.get(13)?,
-                    losses: row.get(14)?,
-                    draws: row.get(15)?,
-                    elo_diff: row.get(16)?,
-                    elo_error: row.get(17)?,
-                    los: row.get(18)?,
+                    created_at: parse_timestamp_column(&created_at, 11)?,
+                    started_at: parse_optional_timestamp_column(started_at, 12)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
+                    wins: row.get(14)?,
+                    losses: row.get(15)?,
+                    draws: row.get(16)?,
+                    elo_diff: row.get(17)?,
+                    elo_error: row.get(18)?,
+                    los: row.get(19)?,
                     sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
                 })
             })?
@@ -1273,7 +1352,7 @@ impl Storage {
     ) -> Result<Vec<EloDataPoint>> {
         let conn = self.conn.lock().unwrap();
         let query = if branch.is_some() {
-            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, rb.branch, r.tag, r.is_release,
+            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, COALESCE(j.branch_context, rb.branch), r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN revision_branches rb ON rb.revision_id = r.id
@@ -1281,7 +1360,7 @@ impl Storage {
              WHERE r.engine_id = ?1 AND rb.branch = ?2 AND j.status = 'Completed' AND j.elo_diff IS NOT NULL AND j.elo_error IS NOT NULL
              ORDER BY r.commit_date ASC"
         } else {
-            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, r.branch, r.tag, r.is_release,
+            "SELECT r.id, r.commit_hash, r.commit_message, r.commit_date, COALESCE(j.branch_context, r.branch), r.tag, r.is_release,
                     j.elo_diff, j.elo_error, (j.wins + j.losses + j.draws) as total_games
              FROM revisions r
              JOIN test_jobs j ON j.dev_revision_id = r.id
@@ -1413,25 +1492,26 @@ impl Storage {
 }
 
 fn map_test_job_row(row: &Row<'_>) -> rusqlite::Result<TestJob> {
-    let tc_str: String = row.get(4)?;
-    let status_str: String = row.get(6)?;
-    let jt_str: String = row.get(8)?;
-    let created_at: String = row.get(9)?;
-    let started_at: Option<String> = row.get(10)?;
-    let completed_at: Option<String> = row.get(11)?;
+    let tc_str: String = row.get(5)?;
+    let status_str: String = row.get(7)?;
+    let jt_str: String = row.get(9)?;
+    let created_at: String = row.get(10)?;
+    let started_at: Option<String> = row.get(11)?;
+    let completed_at: Option<String> = row.get(12)?;
     Ok(TestJob {
         id: row.get(0)?,
         engine_id: row.get(1)?,
         dev_revision_id: row.get(2)?,
         base_revision_id: row.get(3)?,
+        branch_context: row.get(4)?,
         time_control: serde_json::from_str(&tc_str).map_err(json_column_error)?,
-        opening_book: row.get(5)?,
+        opening_book: row.get(6)?,
         status: decode_test_status(&status_str)?,
-        priority: row.get(7)?,
+        priority: row.get(8)?,
         job_type: decode_job_type(&jt_str)?,
-        created_at: parse_timestamp_column(&created_at, 9)?,
-        started_at: parse_optional_timestamp_column(started_at, 10)?,
-        completed_at: parse_optional_timestamp_column(completed_at, 11)?,
+        created_at: parse_timestamp_column(&created_at, 10)?,
+        started_at: parse_optional_timestamp_column(started_at, 11)?,
+        completed_at: parse_optional_timestamp_column(completed_at, 12)?,
         result: None,
     })
 }
@@ -1633,6 +1713,7 @@ mod tests {
             repo_url: "https://example.invalid/repo.git".into(),
             local_path: std::path::PathBuf::from("/tmp/engine"),
             branches: vec!["main".into()],
+            experimental_branches: vec!["exp/*".into()],
             build_cmd: "make".into(),
             binary_path: "engine".into(),
             start_from: None,
@@ -1661,6 +1742,7 @@ mod tests {
             engine_id: engine_id.into(),
             dev_revision_id: dev_revision_id.into(),
             base_revision_id: base_revision_id.into(),
+            branch_context: Some("main".into()),
             time_control: TimeControl::stc(),
             opening_book: None,
             status: TestStatus::Completed,
@@ -1693,6 +1775,19 @@ mod tests {
             storage.get_job_status(&job.id)?,
             Some(TestStatus::Cancelled)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_experimental_branches_on_engine_roundtrip() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = test_engine();
+        storage.insert_engine(&engine)?;
+
+        let stored = storage
+            .get_engine_by_id(&engine.id)?
+            .expect("engine exists");
+        assert_eq!(stored.experimental_branches, vec!["exp/*"]);
         Ok(())
     }
 

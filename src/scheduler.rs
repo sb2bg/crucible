@@ -91,6 +91,7 @@ impl Scheduler {
                     engine_id: engine_id.to_string(),
                     dev_revision_id: dev.id.clone(),
                     base_revision_id: base.id.clone(),
+                    branch_context: Some(dev.branch.clone()),
                     time_control: tc,
                     opening_book: self.config.testing.opening_book.clone(),
                     status: TestStatus::Queued,
@@ -156,6 +157,7 @@ impl Scheduler {
             engine_id: engine_id.to_string(),
             dev_revision_id: dev_revision_id.to_string(),
             base_revision_id: base_revision_id.to_string(),
+            branch_context: None,
             time_control: tc,
             opening_book: self.config.testing.opening_book.clone(),
             status: TestStatus::Queued,
@@ -190,6 +192,7 @@ mod tests {
             repo_url: "https://example.invalid/repo.git".into(),
             local_path: std::path::PathBuf::from("/tmp/engine"),
             branches: vec!["main".into(), "dev".into()],
+            experimental_branches: vec!["exp/*".into()],
             build_cmd: "make".into(),
             binary_path: "engine".into(),
             start_from: None,
@@ -243,6 +246,7 @@ mod tests {
         assert!(jobs
             .iter()
             .any(|job| { job.dev_revision_id == "dev-b2" && job.base_revision_id == "dev-b1" }));
+        assert!(jobs.iter().all(|job| job.branch_context.is_some()));
         Ok(())
     }
 
@@ -262,6 +266,7 @@ mod tests {
             engine_id: engine.id.clone(),
             dev_revision_id: dev.id.clone(),
             base_revision_id: base.id.clone(),
+            branch_context: Some("main".into()),
             time_control: TimeControl::stc(),
             opening_book: None,
             status: TestStatus::Completed,

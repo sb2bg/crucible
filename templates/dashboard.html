@@ -769,6 +769,7 @@
     <button class="tab active" data-tab="overview">Overview</button>
     <button class="tab" data-tab="timeline">Timeline</button>
     <button class="tab" data-tab="jobs">Jobs</button>
+    <button class="tab" data-tab="experiments">Experiments</button>
     <button class="tab" data-tab="bisect">Bisect</button>
     <button class="tab" data-tab="training">Training</button>
     <button class="tab" data-tab="admin">Admin</button>
@@ -859,7 +860,7 @@
     <div class="panel-head">
       <div>
         <h2 class="panel-title">Jobs</h2>
-        <p class="panel-subtitle">running and queued jobs can be cancelled here</p>
+        <p class="panel-subtitle">canonical branch jobs only</p>
       </div>
       <button type="button" id="refresh-jobs">Refresh</button>
     </div>
@@ -883,6 +884,50 @@
       </table>
     </div>
     <div class="empty hidden" id="jobs-empty">No jobs.</div>
+  </section>
+
+  <section class="panel" id="panel-experiments">
+    <div class="stack">
+      <div class="panel-head" style="margin-bottom:0;">
+        <div>
+          <h2 class="panel-title">Experiments</h2>
+          <p class="panel-subtitle">experimental branch history and active comparisons</p>
+        </div>
+        <div class="controls">
+          <select id="experiments-engine-select"></select>
+          <button type="button" id="refresh-experiments">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div class="chart-shell">
+            <canvas class="chart-canvas" id="experiments-chart"></canvas>
+            <div class="chart-tooltip" id="experiments-tooltip"></div>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Engine</th>
+              <th>Branch</th>
+              <th>Dev</th>
+              <th>Base</th>
+              <th>Type</th>
+              <th>W / D / L</th>
+              <th>Elo</th>
+              <th>SPRT</th>
+              <th>Created</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="experiments-jobs-body"></tbody>
+        </table>
+      </div>
+      <div class="empty hidden" id="experiments-jobs-empty">No experimental jobs.</div>
+    </div>
   </section>
 
   <section class="panel" id="panel-bisect">
@@ -949,7 +994,13 @@
           </label>
           <label>
             branches
-            <input name="branches" placeholder="main, dev" required>
+            <input name="branches" placeholder="main, release/*">
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            experimental_branches
+            <input name="experimental_branches" placeholder="exp/*">
           </label>
         </div>
         <div class="form-grid">
@@ -1072,11 +1123,16 @@
   tabs.forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
   document.getElementById('refresh-overview').addEventListener('click', () => refreshAll(true));
   document.getElementById('refresh-timeline').addEventListener('click', () => loadTimeline('timeline'));
-  document.getElementById('refresh-jobs').addEventListener('click', loadJobs);
+  document.getElementById('refresh-jobs').addEventListener('click', () => loadJobs('canonical'));
+  document.getElementById('refresh-experiments').addEventListener('click', () => {
+    loadTimeline('experiments');
+    loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty');
+  });
   document.getElementById('refresh-bisect').addEventListener('click', loadBisect);
   document.getElementById('refresh-training').addEventListener('click', loadTrainingRuns);
   document.getElementById('overview-engine-select').addEventListener('change', () => loadTimeline('overview'));
   document.getElementById('timeline-engine-select').addEventListener('change', () => loadTimeline('timeline'));
+  document.getElementById('experiments-engine-select').addEventListener('change', () => loadTimeline('experiments'));
   document.getElementById('add-engine-form').addEventListener('submit', handleAddEngine);
   document.getElementById('manual-test-form').addEventListener('submit', handleManualTest);
   document.getElementById('bisect-form').addEventListener('submit', handleBisect);
@@ -1222,7 +1278,11 @@
     state.activeTab = tabName;
     tabs.forEach(tab => tab.classList.toggle('active', tab.dataset.tab === tabName));
     panels.forEach(panel => panel.classList.toggle('active', panel.id === `panel-${tabName}`));
-    if (tabName === 'jobs') loadJobs();
+    if (tabName === 'jobs') loadJobs('canonical');
+    if (tabName === 'experiments') {
+      loadTimeline('experiments');
+      loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty');
+    }
     if (tabName === 'bisect') loadBisect();
     if (tabName === 'training') loadTrainingRuns();
     if (tabName === 'timeline') loadTimeline('timeline');
@@ -1232,7 +1292,11 @@
   async function refreshAll(clearCache = false) {
     if (clearCache) state.chartCache = {};
     await Promise.allSettled([updateStatus(), loadEngines()]);
-    if (state.activeTab === 'jobs') loadJobs();
+    if (state.activeTab === 'jobs') loadJobs('canonical');
+    if (state.activeTab === 'experiments') {
+      loadTimeline('experiments');
+      loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty');
+    }
     if (state.activeTab === 'bisect') loadBisect();
     if (state.activeTab === 'training') loadTrainingRuns();
     if (state.activeTab === 'timeline') loadTimeline('timeline');
@@ -1271,6 +1335,7 @@
       renderOverviewEngineGrid();
       renderAdminEngineList();
       loadTimeline('overview');
+      if (state.activeTab === 'experiments') loadTimeline('experiments');
     } catch (error) {
       showToast(error.message, 'error');
     }
@@ -1280,6 +1345,7 @@
     const selects = [
       document.getElementById('overview-engine-select'),
       document.getElementById('timeline-engine-select'),
+      document.getElementById('experiments-engine-select'),
       document.getElementById('manual-test-engine'),
       document.getElementById('bisect-engine')
     ];
@@ -1328,6 +1394,7 @@
         </div>
         <div class="tag-row">
           ${engine.branches.map(branch => `<span class="tag">${escapeHtml(branch)}</span>`).join('')}
+          ${engine.experimental_branches.map(branch => `<span class="tag">exp ${escapeHtml(branch)}</span>`).join('')}
         </div>
         <div class="meta" style="margin-top:8px;">
           build <code>${escapeHtml(engine.build_cmd)}</code><br>
@@ -1359,6 +1426,7 @@
         </div>
         <div class="tag-row">
           ${engine.branches.map(branch => `<span class="tag">${escapeHtml(branch)}</span>`).join('')}
+          ${engine.experimental_branches.map(branch => `<span class="tag">exp ${escapeHtml(branch)}</span>`).join('')}
         </div>
       </div>
     `).join('');
@@ -1378,11 +1446,13 @@
     }
 
     const engineId = select.value;
-    let points = state.chartCache[engineId];
+    const lane = view === 'experiments' ? 'experimental' : 'canonical';
+    const cacheKey = `${lane}:${engineId}`;
+    let points = state.chartCache[cacheKey];
     if (!points) {
       try {
-        points = await api(`/api/timeline/${encodeURIComponent(engineId)}`);
-        state.chartCache[engineId] = points;
+        points = await api(`/api/timeline/${encodeURIComponent(engineId)}?lane=${lane}`);
+        state.chartCache[cacheKey] = points;
       } catch (error) {
         showToast(error.message, 'error');
         points = [];
@@ -1565,12 +1635,12 @@
     };
   }
 
-  async function loadJobs() {
+  async function loadJobs(lane = 'canonical', bodyId = 'jobs-body', emptyId = 'jobs-empty') {
     try {
-      const payload = await api('/api/jobs');
+      const payload = await api(`/api/jobs?lane=${lane}`);
       const jobs = payload.jobs || [];
-      const body = document.getElementById('jobs-body');
-      const empty = document.getElementById('jobs-empty');
+      const body = document.getElementById(bodyId);
+      const empty = document.getElementById(emptyId);
       if (!jobs.length) {
         body.innerHTML = '';
         empty.classList.remove('hidden');
@@ -1592,6 +1662,7 @@
           <tr>
             <td><span class="badge badge-${job.status.toLowerCase()}">${job.status}</span></td>
             <td>${escapeHtml(job.engine_name)}</td>
+            ${lane === 'experimental' ? `<td>${job.branch_context ? `<span class="tag">${escapeHtml(job.branch_context)}</span>` : '—'}</td>` : ''}
             <td class="mono"><button class="mono-link" type="button" data-open-revision="${job.engine_id}|${job.dev_commit_hash}">${escapeHtml(job.dev_commit_hash.slice(0, 8))}</button></td>
             <td class="mono"><button class="mono-link" type="button" data-open-revision="${job.engine_id}|${job.base_commit_hash}">${escapeHtml(job.base_commit_hash.slice(0, 8))}</button></td>
             <td>${escapeHtml(job.job_type)}</td>
@@ -2007,6 +2078,7 @@
         name: String(data.get('name') || '').trim(),
         repo: String(data.get('repo') || '').trim(),
         branches: String(data.get('branches') || '').split(',').map(v => v.trim()).filter(Boolean),
+        experimental_branches: String(data.get('experimental_branches') || '').split(',').map(v => v.trim()).filter(Boolean),
         build_cmd: String(data.get('build_cmd') || '').trim(),
         binary_path: String(data.get('binary_path') || '').trim(),
         start_from: String(data.get('start_from') || '').trim() || null
@@ -2123,9 +2195,17 @@
 
   async function refreshAfterMutation() {
     state.chartCache = {};
-    await Promise.allSettled([updateStatus(), loadEngines(), loadJobs(), loadBisect(), loadTrainingRuns()]);
+    await Promise.allSettled([
+      updateStatus(),
+      loadEngines(),
+      loadJobs('canonical'),
+      loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty'),
+      loadBisect(),
+      loadTrainingRuns()
+    ]);
     loadTimeline('overview');
     if (state.activeTab === 'timeline') loadTimeline('timeline');
+    if (state.activeTab === 'experiments') loadTimeline('experiments');
   }
 
   function setBusy(button, busy) {
@@ -2200,16 +2280,22 @@
     resizeTimer = setTimeout(() => {
       loadTimeline('overview');
       if (state.activeTab === 'timeline') loadTimeline('timeline');
+      if (state.activeTab === 'experiments') loadTimeline('experiments');
     }, 150);
   });
 
   updateStatus();
   loadEngines();
+  loadJobs('canonical');
+  loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty');
+  loadBisect();
+  loadTrainingRuns();
   setInterval(updateStatus, 3000);
   setInterval(() => {
     state.chartCache = {};
     if (state.activeTab === 'overview') loadTimeline('overview');
     if (state.activeTab === 'timeline') loadTimeline('timeline');
+    if (state.activeTab === 'experiments') loadTimeline('experiments');
   }, 30000);
   setInterval(() => {
     if (state.activeTab === 'training') loadTrainingRuns();

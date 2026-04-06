@@ -11,6 +11,9 @@ pub struct Engine {
     pub local_path: PathBuf,
     /// The branch(es) to track
     pub branches: Vec<String>,
+    /// Experimental branch patterns to test separately from the canonical history
+    #[serde(default)]
+    pub experimental_branches: Vec<String>,
     /// Build command (e.g., "make" or "cargo build --release")
     pub build_cmd: String,
     /// Path to the resulting binary, relative to repo root
@@ -50,6 +53,9 @@ pub struct TestJob {
     pub engine_id: String,
     pub dev_revision_id: String,
     pub base_revision_id: String,
+    /// Branch lane that created this job, when it comes from branch-local scheduling
+    #[serde(default)]
+    pub branch_context: Option<String>,
     pub time_control: TimeControl,
     pub opening_book: Option<String>,
     pub status: TestStatus,
@@ -143,6 +149,7 @@ pub struct JobSummary {
     pub dev_commit_hash: String,
     pub base_revision_id: String,
     pub base_commit_hash: String,
+    pub branch_context: Option<String>,
     pub status: TestStatus,
     pub priority: i32,
     pub job_type: JobType,

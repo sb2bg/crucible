@@ -18,7 +18,7 @@ use tracing::warn;
 use crate::bisect::{BisectRunner, BisectStep};
 use crate::config::Config;
 use crate::export::build_export_bundle;
-use crate::git::{short_hash, CommitDetails, DiffSummary, GitManager};
+use crate::git::{branch_pattern_matches, short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
 use crate::training::list_training_runs;
@@ -67,6 +67,8 @@ struct AddEngineRequest {
     name: String,
     repo: String,
     branches: Vec<String>,
+    #[serde(default)]
+    experimental_branches: Vec<String>,
     build_cmd: String,
     binary_path: String,
     start_from: Option<String>,
@@ -90,6 +92,18 @@ struct StartBisectRequest {
 struct CompareQuery {
     base: String,
     head: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LaneQuery {
+    lane: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchLane {
+    Canonical,
+    Experimental,
+    All,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +150,24 @@ struct RevisionLineage {
     skipped_identical_next: usize,
 }
 
+impl BranchLane {
+    fn from_query(value: Option<&str>) -> Self {
+        match value.unwrap_or("canonical") {
+            "experimental" => Self::Experimental,
+            "all" => Self::All,
+            _ => Self::Canonical,
+        }
+    }
+
+    fn includes_branch(self, engine: &Engine, branch: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Canonical => !engine_branch_is_experimental(engine, branch),
+            Self::Experimental => engine_branch_is_experimental(engine, branch),
+        }
+    }
+}
+
 async fn index_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
@@ -167,16 +199,41 @@ async fn engines_handler(State(state): State<Arc<WebState>>) -> impl IntoRespons
 async fn timeline_handler(
     State(state): State<Arc<WebState>>,
     Path(engine_id): Path<String>,
+    Query(query): Query<LaneQuery>,
 ) -> impl IntoResponse {
+    let lane = BranchLane::from_query(query.lane.as_deref());
+    let engine = match state.storage.get_engine_by_id(&engine_id) {
+        Ok(Some(engine)) => engine,
+        Ok(None) => {
+            return json_error(StatusCode::NOT_FOUND, anyhow::anyhow!("engine not found"));
+        }
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    };
     match state.storage.get_elo_timeline(&engine_id, None) {
-        Ok(timeline) => Json(serde_json::to_value(timeline).unwrap()).into_response(),
+        Ok(timeline) => Json(
+            serde_json::to_value(
+                timeline
+                    .into_iter()
+                    .filter(|point| lane.includes_branch(&engine, &point.branch))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+        .into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }
 
-async fn jobs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+async fn jobs_handler(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<LaneQuery>,
+) -> impl IntoResponse {
+    let lane = BranchLane::from_query(query.lane.as_deref());
     match state.storage.list_recent_jobs(50) {
-        Ok(jobs) => Json(json!({ "jobs": jobs })).into_response(),
+        Ok(jobs) => match filter_jobs_for_lane(&state, jobs, lane) {
+            Ok(filtered) => Json(json!({ "jobs": filtered })).into_response(),
+            Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+        },
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }
@@ -230,11 +287,17 @@ async fn add_engine_handler(
         .map(|branch| branch.trim().to_string())
         .filter(|branch| !branch.is_empty())
         .collect::<Vec<_>>();
+    let experimental_branches = request
+        .experimental_branches
+        .iter()
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty())
+        .collect::<Vec<_>>();
     if request.name.trim().is_empty()
         || request.repo.trim().is_empty()
         || request.build_cmd.trim().is_empty()
         || request.binary_path.trim().is_empty()
-        || branches.is_empty()
+        || (branches.is_empty() && experimental_branches.is_empty())
     {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -242,7 +305,7 @@ async fn add_engine_handler(
         );
     }
 
-    match create_or_update_engine(&state, request, branches) {
+    match create_or_update_engine(&state, request, branches, experimental_branches) {
         Ok(engine) => Json(json!({ "engine": engine })).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
     }
@@ -409,6 +472,7 @@ fn create_or_update_engine(
     state: &WebState,
     request: AddEngineRequest,
     branches: Vec<String>,
+    experimental_branches: Vec<String>,
 ) -> anyhow::Result<Engine> {
     let existing = state.storage.get_engine_by_name(request.name.trim())?;
     let engine = Engine {
@@ -424,6 +488,7 @@ fn create_or_update_engine(
             .join("repos")
             .join(request.name.trim()),
         branches,
+        experimental_branches,
         build_cmd: request.build_cmd.trim().to_string(),
         binary_path: request.binary_path.trim().to_string(),
         start_from: request
@@ -433,6 +498,59 @@ fn create_or_update_engine(
     };
     state.storage.insert_engine(&engine)?;
     Ok(engine)
+}
+
+fn combined_tracked_branches(engine: &Engine) -> Vec<String> {
+    let mut combined = engine.branches.clone();
+    combined.extend(engine.experimental_branches.clone());
+    combined.sort();
+    combined.dedup();
+    combined
+}
+
+fn engine_branch_is_experimental(engine: &Engine, branch: &str) -> bool {
+    engine
+        .experimental_branches
+        .iter()
+        .any(|pattern| branch_pattern_matches(pattern, branch))
+}
+
+fn job_matches_lane(state: &WebState, job: &JobSummary, lane: BranchLane) -> anyhow::Result<bool> {
+    if lane == BranchLane::All {
+        return Ok(true);
+    }
+
+    let engine = state
+        .storage
+        .get_engine_by_id(&job.engine_id)?
+        .ok_or_else(|| anyhow::anyhow!("engine not found for job {}", job.id))?;
+
+    if let Some(branch) = job.branch_context.as_deref() {
+        return Ok(lane.includes_branch(&engine, branch));
+    }
+
+    let mut branches = state.storage.get_revision_branches(&job.dev_revision_id)?;
+    branches.extend(state.storage.get_revision_branches(&job.base_revision_id)?);
+    branches.sort();
+    branches.dedup();
+
+    Ok(branches
+        .iter()
+        .any(|branch| lane.includes_branch(&engine, branch)))
+}
+
+fn filter_jobs_for_lane(
+    state: &WebState,
+    jobs: Vec<JobSummary>,
+    lane: BranchLane,
+) -> anyhow::Result<Vec<JobSummary>> {
+    let mut filtered = Vec::new();
+    for job in jobs {
+        if job_matches_lane(state, &job, lane)? {
+            filtered.push(job);
+        }
+    }
+    Ok(filtered)
 }
 
 fn queue_manual_test(
@@ -710,7 +828,7 @@ fn sync_engine_revisions(
     git_mgr: &GitManager,
     repo: &git2::Repository,
 ) -> anyhow::Result<()> {
-    let branches = git_mgr.resolve_branch_patterns(repo, &engine.branches)?;
+    let branches = git_mgr.resolve_branch_patterns(repo, &combined_tracked_branches(engine))?;
     for branch in &branches {
         let revisions =
             git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;

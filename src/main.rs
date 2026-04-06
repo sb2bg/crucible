@@ -71,6 +71,9 @@ enum Commands {
         /// Branch(es) to track (comma-separated)
         #[arg(long, default_value = "main")]
         branches: String,
+        /// Experimental branch(es) to track separately (comma-separated)
+        #[arg(long, default_value = "")]
+        experimental_branches: String,
         /// Start from this commit/tag
         #[arg(long)]
         start_from: Option<String>,
@@ -225,6 +228,7 @@ async fn main() -> Result<()> {
             build,
             binary_path,
             branches,
+            experimental_branches,
             start_from,
         } => {
             let storage = open_storage(&config)?;
@@ -238,7 +242,16 @@ async fn main() -> Result<()> {
                 name: name.clone(),
                 repo_url: repo.clone(),
                 local_path: config.data_dir.join("repos").join(&name),
-                branches: branches.split(',').map(|s| s.trim().to_string()).collect(),
+                branches: branches
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                experimental_branches: experimental_branches
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
                 build_cmd: build,
                 binary_path,
                 start_from,
@@ -629,6 +642,7 @@ fn sync_config_engines(storage: &Storage, config: &Config) -> Result<()> {
             repo_url: engine_cfg.repo.clone(),
             local_path: config.data_dir.join("repos").join(&engine_cfg.name),
             branches: engine_cfg.branches.clone(),
+            experimental_branches: engine_cfg.experimental_branches.clone(),
             build_cmd: engine_cfg.build_cmd.clone(),
             binary_path: engine_cfg.binary_path.clone(),
             start_from: engine_cfg.start_from.clone(),
@@ -742,7 +756,14 @@ fn sync_engine_revisions(
     git_mgr: &GitManager,
     repo: &git2::Repository,
 ) -> Result<()> {
-    let branches = git_mgr.resolve_branch_patterns(repo, &engine.branches)?;
+    let branches = git_mgr.resolve_branch_patterns(
+        repo,
+        &[
+            engine.branches.clone(),
+            engine.experimental_branches.clone(),
+        ]
+        .concat(),
+    )?;
     for branch in &branches {
         let revisions =
             git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;

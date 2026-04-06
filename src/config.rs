@@ -224,6 +224,8 @@ pub struct EngineConfig {
     pub repo: String,
     #[serde(default = "default_branches")]
     pub branches: Vec<String>,
+    #[serde(default)]
+    pub experimental_branches: Vec<String>,
     pub build_cmd: String,
     pub binary_path: String,
     /// Start testing from this commit/tag (default: test everything)
@@ -280,6 +282,7 @@ impl Config {
                 name: "my-engine".into(),
                 repo: "https://github.com/user/chess-engine".into(),
                 branches: vec!["main".into(), "dev".into()],
+                experimental_branches: vec!["exp/*".into()],
                 build_cmd: "cargo build --release".into(),
                 binary_path: "target/release/my-engine".into(),
                 start_from: Some("v1.0.0".into()),
@@ -312,6 +315,14 @@ impl Config {
         }
         if matches!(self.testing.time_control.nodes, Some(0)) {
             anyhow::bail!("testing.time_control.nodes must be greater than 0 when set");
+        }
+        for engine in &self.engines {
+            if engine.branches.is_empty() && engine.experimental_branches.is_empty() {
+                anyhow::bail!(
+                    "engine '{}' must define branches and/or experimental_branches",
+                    engine.name
+                );
+            }
         }
         if self.testing.sprt.elo0 >= self.testing.sprt.elo1 {
             anyhow::bail!("testing.sprt.elo0 must be less than elo1");

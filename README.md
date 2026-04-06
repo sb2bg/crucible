@@ -98,7 +98,7 @@ web_host = "127.0.0.1"    # use "0.0.0.0" in Docker
 admin_token = "change-me" # optional; protects /api/admin/* with Bearer auth
 
 [testing]
-concurrency = 4            # Total worker budget; one lone job can fan out into 4 parallel games
+concurrency = 4            # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance
@@ -208,7 +208,6 @@ Published images go to `ghcr.io/sb2bg/crucible`.
 2. **Build** — Each commit is checked out and built using your build command
 3. **Schedule** — The smart scheduler decides which commits to test next
 4. **Test** — Pairs of engines play matches using the UCI protocol
-   When only one job is running, Crucible uses the idle concurrency budget to run multiple games from that match at once.
 5. **Analyze** — SPRT determines if the change is significant; Elo is estimated
 6. **Repeat** — Crucible never stops. New commits are picked up automatically.
 

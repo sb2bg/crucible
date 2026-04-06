@@ -66,7 +66,6 @@ pub struct MatchConfig {
     pub opening_book: Option<Vec<String>>,
     pub sprt_bounds: SprtBounds,
     pub max_games: u32,
-    pub parallel_games: u32,
     pub hash_mb: u32,
     pub threads: u32,
     pub cancel_flag: Option<Arc<AtomicBool>>,
@@ -85,147 +84,109 @@ pub async fn run_match(
     let openings = config
         .opening_book
         .unwrap_or_else(|| vec!["startpos".to_string()]);
-    let max_parallel_games = usize::try_from(config.parallel_games.max(1)).unwrap_or(1);
-    let mut next_game_number: u32 = 1;
-    let mut stop_launching = false;
-    let mut workers = tokio::task::JoinSet::new();
-    let mut first_conclusion: Option<(u32, SprtResult)> = None;
 
-    loop {
-        while !stop_launching
-            && workers.len() < max_parallel_games
-            && next_game_number <= config.max_games
-        {
-            if is_cancelled(config.cancel_flag.as_deref()) {
-                anyhow::bail!("match cancelled");
+    let mut game_number: u32 = 0;
+
+    for opening in openings.iter().cycle() {
+        if is_cancelled(config.cancel_flag.as_deref()) {
+            anyhow::bail!("match cancelled");
+        }
+        if game_number >= config.max_games {
+            break;
+        }
+
+        // Play a pair of games (swap colors)
+        for swap in [false, true] {
+            game_number += 1;
+            if game_number > config.max_games {
+                break;
             }
 
-            let game_number = next_game_number;
-            next_game_number += 1;
-            let spec = scheduled_game(&openings, game_number);
             let _ = event_tx.send(MatchEvent::GameStarted { game_number });
 
-            let dev_binary = config.dev_binary.clone();
-            let base_binary = config.base_binary.clone();
-            let tc = config.time_control.clone();
-            let cancel_flag = config.cancel_flag.clone();
-            let opening = spec.opening;
-            let hash_mb = config.hash_mb;
-            let threads = config.threads;
-            let swap = spec.swap_colors;
-            workers.spawn(async move {
-                (
-                    game_number,
-                    opening.clone(),
-                    swap,
-                    play_single_game(
-                        &dev_binary,
-                        &base_binary,
-                        &opening,
-                        &tc,
-                        hash_mb,
-                        threads,
+            let result = play_single_game(
+                &config.dev_binary,
+                &config.base_binary,
+                opening,
+                &config.time_control,
+                config.hash_mb,
+                config.threads,
+                game_number,
+                swap,
+                config.cancel_flag.clone(),
+            )
+            .await;
+
+            match result {
+                Ok((game_result, pgn, move_count, training_samples)) => {
+                    match game_result {
+                        GameResult::WhiteWin if !swap => wins += 1,
+                        GameResult::BlackWin if !swap => losses += 1,
+                        GameResult::WhiteWin if swap => losses += 1,
+                        GameResult::BlackWin if swap => wins += 1,
+                        GameResult::Draw => draws += 1,
+                        _ => {}
+                    }
+
+                    let record = GameRecord {
                         game_number,
-                        swap,
-                        cancel_flag,
-                    )
-                    .await,
-                )
+                        result: game_result,
+                        pgn,
+                        opening: opening.clone(),
+                        move_count,
+                    };
+                    let event_record = record.clone();
+                    games.push(record);
+
+                    let _ = event_tx.send(MatchEvent::GameCompleted {
+                        game_number,
+                        result: game_result,
+                        record: event_record,
+                        training_samples,
+                    });
+                }
+                Err(e) => {
+                    if is_cancelled(config.cancel_flag.as_deref()) {
+                        anyhow::bail!("match cancelled");
+                    }
+                    error!("Game {} failed: {}", game_number, e);
+                    let _ = event_tx.send(MatchEvent::Error {
+                        message: format!("Game {} failed: {}", game_number, e),
+                    });
+                    continue;
+                }
+            }
+
+            // Check SPRT after each game
+            let sprt_result = sprt::sprt_test(wins, draws, losses, &config.sprt_bounds);
+            let _ = event_tx.send(MatchEvent::SprtUpdate {
+                wins,
+                draws,
+                losses,
+                llr_status: sprt_result,
             });
-        }
 
-        if workers.is_empty() {
-            break;
-        }
-
-        let Some(joined) = workers.join_next().await else {
-            break;
-        };
-        let (game_number, opening, swap, result) =
-            joined.map_err(|err| anyhow!("game task panicked: {}", err))?;
-
-        match result {
-            Ok((game_result, pgn, move_count, training_samples)) => {
-                match game_result {
-                    GameResult::WhiteWin if !swap => wins += 1,
-                    GameResult::BlackWin if !swap => losses += 1,
-                    GameResult::WhiteWin if swap => losses += 1,
-                    GameResult::BlackWin if swap => wins += 1,
-                    GameResult::Draw => draws += 1,
-                    _ => {}
-                }
-
-                let record = GameRecord {
-                    game_number,
-                    result: game_result,
-                    pgn,
-                    opening,
-                    move_count,
-                };
-                let event_record = record.clone();
-                games.push(record);
-
-                let _ = event_tx.send(MatchEvent::GameCompleted {
-                    game_number,
-                    result: game_result,
-                    record: event_record,
-                    training_samples,
+            if sprt_result != SprtResult::Inconclusive {
+                info!(
+                    "SPRT concluded after {} games: {:?} (W:{} D:{} L:{})",
+                    game_number, sprt_result, wins, draws, losses
+                );
+                let result = build_test_result(wins, draws, losses, sprt_result, games);
+                let _ = event_tx.send(MatchEvent::MatchCompleted {
+                    result: result.clone(),
                 });
+                return Ok(result);
             }
-            Err(e) => {
-                if is_cancelled(config.cancel_flag.as_deref()) {
-                    anyhow::bail!("match cancelled");
-                }
-                error!("Game {} failed: {}", game_number, e);
-                let _ = event_tx.send(MatchEvent::Error {
-                    message: format!("Game {} failed: {}", game_number, e),
-                });
-                continue;
-            }
-        }
-
-        let sprt_result = sprt::sprt_test(wins, draws, losses, &config.sprt_bounds);
-        let _ = event_tx.send(MatchEvent::SprtUpdate {
-            wins,
-            draws,
-            losses,
-            llr_status: sprt_result,
-        });
-
-        if sprt_result != SprtResult::Inconclusive && first_conclusion.is_none() {
-            info!(
-                "SPRT concluded after {} games: {:?} (W:{} D:{} L:{})",
-                game_number, sprt_result, wins, draws, losses
-            );
-            first_conclusion = Some((game_number, sprt_result));
-            stop_launching = true;
         }
     }
 
-    games.sort_by_key(|record| record.game_number);
-    let sprt_result = first_conclusion
-        .map(|(_, result)| result)
-        .unwrap_or_else(|| sprt::sprt_test(wins, draws, losses, &config.sprt_bounds));
+    // Max games reached without SPRT conclusion
+    let sprt_result = sprt::sprt_test(wins, draws, losses, &config.sprt_bounds);
     let result = build_test_result(wins, draws, losses, sprt_result, games);
     let _ = event_tx.send(MatchEvent::MatchCompleted {
         result: result.clone(),
     });
     Ok(result)
-}
-
-struct ScheduledGame {
-    opening: String,
-    swap_colors: bool,
-}
-
-fn scheduled_game(openings: &[String], game_number: u32) -> ScheduledGame {
-    let pair_index = (game_number.saturating_sub(1) / 2) as usize;
-    let opening = openings[pair_index % openings.len()].clone();
-    let swap_colors = game_number % 2 == 0;
-    ScheduledGame {
-        opening,
-        swap_colors,
-    }
 }
 
 fn build_test_result(
@@ -684,24 +645,5 @@ mod tests {
 
         assert_eq!(pgn_moves, "42... ");
         Ok(())
-    }
-
-    #[test]
-    fn scheduled_games_preserve_opening_pairs_and_color_swap() {
-        let openings = vec!["startpos".to_string(), "fen test".to_string()];
-
-        let first = scheduled_game(&openings, 1);
-        let second = scheduled_game(&openings, 2);
-        let third = scheduled_game(&openings, 3);
-        let fourth = scheduled_game(&openings, 4);
-
-        assert_eq!(first.opening, "startpos");
-        assert!(!first.swap_colors);
-        assert_eq!(second.opening, "startpos");
-        assert!(second.swap_colors);
-        assert_eq!(third.opening, "fen test");
-        assert!(!third.swap_colors);
-        assert_eq!(fourth.opening, "fen test");
-        assert!(fourth.swap_colors);
     }
 }

@@ -8,6 +8,11 @@ use anyhow::{bail, Result};
 
 use crate::types::SprtResult;
 
+const LOGISTIC_SCALE: f64 = 400.0;
+const MIN_DRAW_SCALE: f64 = 1.0;
+const MAX_DRAW_SCALE: f64 = 1.0e6;
+const PROB_EPSILON: f64 = 1.0e-12;
+
 /// SPRT bounds configuration
 #[derive(Debug, Clone, Copy)]
 pub struct SprtBounds {
@@ -171,33 +176,86 @@ pub fn sprt_test(wins: u32, draws: u32, losses: u32, bounds: &SprtBounds) -> Spr
     }
 }
 
-/// Compute the log-likelihood ratio for the pentanomial/trinomial model
+/// Compute the BayesElo-style trinomial log-likelihood ratio.
+///
+/// This uses the exact W/D/L likelihood from BayesElo's outcome model and
+/// profiles out the nuisance `drawelo` parameter independently under H0 and H1.
 fn log_likelihood_ratio(wins: u32, draws: u32, losses: u32, elo0: f64, elo1: f64) -> f64 {
-    let total = (wins + draws + losses) as f64;
-    if total == 0.0 {
+    if wins + draws + losses == 0 {
         return 0.0;
     }
 
-    let w = wins as f64 / total;
-    let d = draws as f64 / total;
-    let s0 = elo_to_score(elo0);
-    let s1 = elo_to_score(elo1);
-    let s = w + d * 0.5;
+    let ll0 = profile_log_likelihood(wins, draws, losses, elo0);
+    let ll1 = profile_log_likelihood(wins, draws, losses, elo1);
+    ll1 - ll0
+}
 
-    // Avoid log(0)
-    if s <= 0.0 || s >= 1.0 {
-        return if s >= 1.0 { 100.0 } else { -100.0 };
+fn profile_log_likelihood(wins: u32, draws: u32, losses: u32, elo: f64) -> f64 {
+    let draw_scale = mle_draw_scale(wins, draws, losses, elo);
+    bayeselo_log_likelihood(wins, draws, losses, elo, draw_scale)
+}
+
+fn mle_draw_scale(wins: u32, draws: u32, losses: u32, elo: f64) -> f64 {
+    if draws == 0 {
+        return MIN_DRAW_SCALE;
     }
 
-    // BayesElo trinomial LLR approximation
-    // LLR ≈ n * [ (s - s0)^2 / (2 * s * (1-s)) - (s - s1)^2 / (2 * s * (1-s)) ]
-    // Simplified: LLR ≈ n * (s1 - s0) * (2*s - s0 - s1) / (2 * s * (1-s))
-    let variance = s * (1.0 - s);
-    if variance <= 0.0 {
-        return 0.0;
+    let mut low = MIN_DRAW_SCALE;
+    let mut high = 2.0;
+    while draw_scale_derivative(wins, draws, losses, elo, high) > 0.0 && high < MAX_DRAW_SCALE {
+        low = high;
+        high = (high * 2.0).min(MAX_DRAW_SCALE);
     }
 
-    total * (s1 - s0) * (2.0 * s - s0 - s1) / (2.0 * variance)
+    if draw_scale_derivative(wins, draws, losses, elo, low) <= 0.0 {
+        return low;
+    }
+
+    for _ in 0..96 {
+        let mid = (low + high) * 0.5;
+        if draw_scale_derivative(wins, draws, losses, elo, mid) > 0.0 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    (low + high) * 0.5
+}
+
+fn draw_scale_derivative(wins: u32, draws: u32, losses: u32, elo: f64, draw_scale: f64) -> f64 {
+    let win_scale = 10.0_f64.powf(-elo / LOGISTIC_SCALE);
+    let loss_scale = 10.0_f64.powf(elo / LOGISTIC_SCALE);
+    let t = draw_scale.max(MIN_DRAW_SCALE);
+
+    let draws_term = if draws == 0 {
+        0.0
+    } else {
+        2.0 * draws as f64 * t / (t * t - 1.0)
+    };
+    let win_term = (wins + draws) as f64 * win_scale / (1.0 + win_scale * t);
+    let loss_term = (losses + draws) as f64 * loss_scale / (1.0 + loss_scale * t);
+
+    draws_term - win_term - loss_term
+}
+
+fn bayeselo_log_likelihood(wins: u32, draws: u32, losses: u32, elo: f64, draw_scale: f64) -> f64 {
+    let (p_win, p_draw, p_loss) = bayeselo_probabilities(elo, draw_scale);
+    wins as f64 * p_win.max(PROB_EPSILON).ln()
+        + draws as f64 * p_draw.max(PROB_EPSILON).ln()
+        + losses as f64 * p_loss.max(PROB_EPSILON).ln()
+}
+
+fn bayeselo_probabilities(elo: f64, draw_scale: f64) -> (f64, f64, f64) {
+    let win_scale = 10.0_f64.powf(-elo / LOGISTIC_SCALE);
+    let loss_scale = 10.0_f64.powf(elo / LOGISTIC_SCALE);
+    let t = draw_scale.max(MIN_DRAW_SCALE);
+
+    let p_win = 1.0 / (1.0 + win_scale * t);
+    let p_loss = 1.0 / (1.0 + loss_scale * t);
+    let p_draw = 1.0 - p_win - p_loss;
+
+    (p_win, p_draw.max(0.0), p_loss)
 }
 
 /// Error function approximation (Abramowitz and Stegun)
@@ -279,5 +337,26 @@ mod tests {
         let bounds = SprtBounds::default();
         let result = sprt_test(4, 0, 0, &bounds);
         assert_eq!(result, SprtResult::Inconclusive);
+    }
+
+    #[test]
+    fn bayeselo_probabilities_match_expected_symmetry() {
+        let (p_win, p_draw, p_loss) = bayeselo_probabilities(0.0, 10.0_f64.powf(97.3 / 400.0));
+        assert!((p_win - p_loss).abs() < 1e-12);
+        assert!((p_win + p_draw + p_loss - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn draw_scale_profiles_to_boundary_without_draws() {
+        let draw_scale = mle_draw_scale(10, 0, 10, 0.0);
+        assert!((draw_scale - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn llr_flips_sign_when_wins_and_losses_are_swapped() {
+        let forward = log_likelihood_ratio(80, 40, 20, 0.0, 5.0);
+        let reverse = log_likelihood_ratio(20, 40, 80, 0.0, 5.0);
+        assert!(forward > 0.0);
+        assert!(reverse < 0.0);
     }
 }

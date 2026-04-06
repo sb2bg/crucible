@@ -3,22 +3,23 @@
 //! Supports concurrent games, opening books, and real-time
 //! SPRT evaluation to stop early when a result is conclusive.
 
-use anyhow::{anyhow, Result};
-use cozy_chess::{util::parse_uci_move, Board, Color, GameStatus};
-use std::collections::HashMap;
+use anyhow::Result;
+use cozy_chess::{util::parse_uci_move, Color, GameStatus};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::chess_rules::{
+    has_insufficient_material, opponent_win, parse_opening_board, per_move_timeout,
+    perspective_result, record_position, resolve_no_move_result, MAX_MOVES_PER_GAME,
+};
 use crate::engine::uci::UciEngine;
 use crate::sprt::{self, SprtBounds};
 use crate::training::CollectedTrainingSample;
 use crate::types::*;
-
-const UCI_CLOCK_GRACE_MS: u64 = 1_000;
 
 /// Event emitted during a match for live updates
 #[derive(Debug, Clone)]
@@ -274,9 +275,8 @@ fn play_game_blocking(
     let mut wtime = tc.base_time_ms;
     let mut btime = tc.base_time_ms;
     let mut move_count: u32 = 0;
-    let max_moves = 500; // adjudication
     let mut board = parse_opening_board(opening)?;
-    let mut seen_positions = HashMap::new();
+    let mut seen_positions = Vec::new();
     record_position(&mut seen_positions, &board);
     let mut pending_samples: Vec<PendingTaggedSample> = Vec::new();
 
@@ -290,7 +290,7 @@ fn play_game_blocking(
         if is_cancelled(cancel_flag.as_deref()) {
             anyhow::bail!("match cancelled");
         }
-        if move_count >= max_moves {
+        if move_count >= MAX_MOVES_PER_GAME {
             // Adjudicate as draw
             return Ok((
                 GameResult::Draw,
@@ -464,6 +464,15 @@ fn play_game_blocking(
                 ));
             }
 
+            if has_insufficient_material(&board) {
+                return Ok((
+                    GameResult::Draw,
+                    pgn_moves,
+                    move_count,
+                    finalize_training_samples(pending_samples, GameResult::Draw),
+                ));
+            }
+
             match board.status() {
                 GameStatus::Won => {
                     let result = if is_white_turn {
@@ -544,61 +553,15 @@ fn finalize_training_samples(
         .collect()
 }
 
-fn parse_opening_board(opening: &str) -> Result<Board> {
-    if opening == "startpos" {
-        Ok(Board::default())
-    } else {
-        opening
-            .parse::<Board>()
-            .map_err(|_| anyhow!("invalid opening FEN '{}'", opening))
-    }
-}
-
-fn per_move_timeout(remaining_ms: u64, increment_ms: u64) -> Duration {
-    Duration::from_millis(
-        remaining_ms
-            .saturating_add(increment_ms)
-            .saturating_add(UCI_CLOCK_GRACE_MS),
-    )
-}
-
 fn is_cancelled(flag: Option<&AtomicBool>) -> bool {
     flag.is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
-
-fn opponent_win(side_to_move: Color) -> GameResult {
-    match side_to_move {
-        Color::White => GameResult::BlackWin,
-        Color::Black => GameResult::WhiteWin,
-    }
-}
-
-fn resolve_no_move_result(board: &Board) -> GameResult {
-    match board.status() {
-        GameStatus::Drawn => GameResult::Draw,
-        GameStatus::Won | GameStatus::Ongoing => opponent_win(board.side_to_move()),
-    }
-}
-
-fn record_position(seen_positions: &mut HashMap<u64, u8>, board: &Board) -> u8 {
-    let entry = seen_positions.entry(board.hash()).or_insert(0);
-    *entry = entry.saturating_add(1);
-    *entry
-}
-
-fn perspective_result(result: GameResult, side_to_move: Color) -> GameResult {
-    match (result, side_to_move) {
-        (GameResult::Draw, _) => GameResult::Draw,
-        (GameResult::WhiteWin, Color::White) => GameResult::WhiteWin,
-        (GameResult::WhiteWin, Color::Black) => GameResult::BlackWin,
-        (GameResult::BlackWin, Color::White) => GameResult::BlackWin,
-        (GameResult::BlackWin, Color::Black) => GameResult::WhiteWin,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+    use cozy_chess::Board;
 
     #[test]
     fn none_result_on_stalemate_is_draw() -> Result<()> {
@@ -617,10 +580,40 @@ mod tests {
     #[test]
     fn repeated_positions_trigger_threefold_counter() {
         let board = Board::default();
-        let mut seen_positions = HashMap::new();
+        let mut seen_positions = Vec::new();
         assert_eq!(record_position(&mut seen_positions, &board), 1);
         assert_eq!(record_position(&mut seen_positions, &board), 2);
         assert_eq!(record_position(&mut seen_positions, &board), 3);
+    }
+
+    #[test]
+    fn repetition_uses_fide_equivalent_positions() -> Result<()> {
+        let board_a =
+            parse_opening_board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")?;
+        let board_b =
+            parse_opening_board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 4 3")?;
+        assert_ne!(board_a.hash(), board_b.hash());
+        assert!(board_a.same_position(&board_b));
+
+        let mut seen_positions = Vec::new();
+        assert_eq!(record_position(&mut seen_positions, &board_a), 1);
+        assert_eq!(record_position(&mut seen_positions, &board_b), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn insufficient_material_bare_kings_is_draw() -> Result<()> {
+        let board = parse_opening_board("8/8/8/8/8/8/4k3/4K3 w - - 0 1")?;
+        assert!(has_insufficient_material(&board));
+        assert_eq!(resolve_no_move_result(&board), GameResult::Draw);
+        Ok(())
+    }
+
+    #[test]
+    fn insufficient_material_single_minor_is_draw() -> Result<()> {
+        let board = parse_opening_board("8/8/8/8/8/8/4k3/3NK3 w - - 0 1")?;
+        assert!(has_insufficient_material(&board));
+        Ok(())
     }
 
     #[test]

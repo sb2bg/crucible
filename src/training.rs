@@ -1,19 +1,20 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use cozy_chess::{util::parse_uci_move, Board, Color, GameStatus};
+use cozy_chess::{util::parse_uci_move, Color, GameStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 
+use crate::chess_rules::{
+    has_insufficient_material, opponent_win, parse_opening_board, per_move_timeout,
+    perspective_result, record_position, resolve_no_move_result, MAX_MOVES_PER_GAME,
+};
 use crate::engine::uci::{SearchScore, UciEngine};
 use crate::types::{GameResult, TimeControl};
-
-const UCI_CLOCK_GRACE_MS: u64 = 1_000;
-const MAX_MOVES_PER_GAME: u32 = 500;
 
 pub struct SelfPlayDataConfig {
     pub engine_id: String,
@@ -528,7 +529,7 @@ fn play_selfplay_game(
 
     let mut moves: Vec<String> = Vec::new();
     let mut board = parse_opening_board(opening)?;
-    let mut seen_positions = HashMap::new();
+    let mut seen_positions = Vec::new();
     record_position(&mut seen_positions, &board);
     let position = if opening == "startpos" {
         "startpos".to_string()
@@ -626,6 +627,10 @@ fn play_selfplay_game(
             break GameResult::Draw;
         }
 
+        if has_insufficient_material(&board) {
+            break GameResult::Draw;
+        }
+
         match board.status() {
             GameStatus::Won => {
                 break if is_white_turn {
@@ -658,54 +663,6 @@ fn play_selfplay_game(
         .collect())
 }
 
-fn parse_opening_board(opening: &str) -> Result<Board> {
-    if opening == "startpos" {
-        Ok(Board::default())
-    } else {
-        opening
-            .parse::<Board>()
-            .map_err(|_| anyhow!("invalid opening FEN '{}'", opening))
-    }
-}
-
-fn per_move_timeout(remaining_ms: u64, increment_ms: u64) -> Duration {
-    Duration::from_millis(
-        remaining_ms
-            .saturating_add(increment_ms)
-            .saturating_add(UCI_CLOCK_GRACE_MS),
-    )
-}
-
-fn opponent_win(side_to_move: Color) -> GameResult {
-    match side_to_move {
-        Color::White => GameResult::BlackWin,
-        Color::Black => GameResult::WhiteWin,
-    }
-}
-
-fn resolve_no_move_result(board: &Board) -> GameResult {
-    match board.status() {
-        GameStatus::Drawn => GameResult::Draw,
-        GameStatus::Won | GameStatus::Ongoing => opponent_win(board.side_to_move()),
-    }
-}
-
-fn record_position(seen_positions: &mut HashMap<u64, u8>, board: &Board) -> u8 {
-    let entry = seen_positions.entry(board.hash()).or_insert(0);
-    *entry = entry.saturating_add(1);
-    *entry
-}
-
-fn perspective_result(result: GameResult, side_to_move: Color) -> GameResult {
-    match (result, side_to_move) {
-        (GameResult::Draw, _) => GameResult::Draw,
-        (GameResult::WhiteWin, Color::White) => GameResult::WhiteWin,
-        (GameResult::WhiteWin, Color::Black) => GameResult::BlackWin,
-        (GameResult::BlackWin, Color::White) => GameResult::BlackWin,
-        (GameResult::BlackWin, Color::Black) => GameResult::WhiteWin,
-    }
-}
-
 fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
@@ -722,6 +679,7 @@ fn sanitize_path_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cozy_chess::Board;
 
     #[test]
     fn perspective_result_is_relative_to_side_to_move() {
@@ -845,6 +803,29 @@ mod tests {
     fn no_move_result_uses_board_side_to_move() -> Result<()> {
         let board = parse_opening_board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")?;
         assert_eq!(resolve_no_move_result(&board), GameResult::WhiteWin);
+        Ok(())
+    }
+
+    #[test]
+    fn repetition_uses_fide_equivalent_positions() -> Result<()> {
+        let board_a =
+            parse_opening_board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")?;
+        let board_b =
+            parse_opening_board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 4 3")?;
+        assert_ne!(board_a.hash(), board_b.hash());
+        assert!(board_a.same_position(&board_b));
+
+        let mut seen_positions = Vec::new();
+        assert_eq!(record_position(&mut seen_positions, &board_a), 1);
+        assert_eq!(record_position(&mut seen_positions, &board_b), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn insufficient_material_bare_kings_is_draw() -> Result<()> {
+        let board = parse_opening_board("8/8/8/8/8/8/4k3/4K3 w - - 0 1")?;
+        assert!(has_insufficient_material(&board));
+        assert_eq!(resolve_no_move_result(&board), GameResult::Draw);
         Ok(())
     }
 

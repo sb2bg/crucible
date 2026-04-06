@@ -1,4 +1,5 @@
 pub mod bisect;
+pub mod chess_rules;
 pub mod config;
 pub mod engine;
 pub mod export;

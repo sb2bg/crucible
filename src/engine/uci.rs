@@ -4,14 +4,18 @@
 //! sending commands and parsing responses.
 
 use anyhow::{Context, Result};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::debug;
+
+const STDERR_TAIL_LINES: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchScore {
@@ -38,6 +42,7 @@ pub struct UciEngine {
     process: Child,
     stdin: std::process::ChildStdin,
     stdout_rx: Receiver<String>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl UciEngine {
@@ -46,13 +51,16 @@ impl UciEngine {
         let mut process = Command::new(binary_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context(format!("Failed to launch engine: {:?}", binary_path))?;
 
         let stdin = process.stdin.take().context("No stdin")?;
         let stdout = process.stdout.take().context("No stdout")?;
+        let stderr = process.stderr.take().context("No stderr")?;
         let (stdout_tx, stdout_rx) = mpsc::channel();
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        let stderr_tail_reader = Arc::clone(&stderr_tail);
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -66,12 +74,28 @@ impl UciEngine {
                 }
             }
         });
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                debug!("[stderr] << {}", line);
+                if let Ok(mut tail) = stderr_tail_reader.lock() {
+                    if tail.len() == STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            }
+        });
 
         let mut engine = Self {
             name: name.to_string(),
             process,
             stdin,
             stdout_rx,
+            stderr_tail,
         };
 
         engine.send_cmd("uci")?;
@@ -83,8 +107,8 @@ impl UciEngine {
     /// Send a command to the engine
     pub fn send_cmd(&mut self, cmd: &str) -> Result<()> {
         debug!("[{}] >> {}", self.name, cmd);
-        writeln!(self.stdin, "{}", cmd)?;
-        self.stdin.flush()?;
+        writeln!(self.stdin, "{}", cmd).map_err(|err| self.command_error(err))?;
+        self.stdin.flush().map_err(|err| self.command_error(err))?;
         Ok(())
     }
 
@@ -93,19 +117,30 @@ impl UciEngine {
         let start = Instant::now();
         loop {
             if start.elapsed() >= timeout {
-                anyhow::bail!("Timeout waiting for '{}' from {}", prefix, self.name);
+                anyhow::bail!(
+                    "Timeout waiting for '{}' from {}{}",
+                    prefix,
+                    self.name,
+                    self.stderr_summary()
+                );
             }
             let remaining = timeout.saturating_sub(start.elapsed());
             let line = match self.stdout_rx.recv_timeout(remaining) {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
-                    anyhow::bail!("Timeout waiting for '{}' from {}", prefix, self.name);
+                    anyhow::bail!(
+                        "Timeout waiting for '{}' from {}{}",
+                        prefix,
+                        self.name,
+                        self.stderr_summary()
+                    );
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     anyhow::bail!(
-                        "Engine '{}' exited while waiting for '{}'",
+                        "Engine '{}' exited while waiting for '{}'{}",
                         self.name,
-                        prefix
+                        prefix,
+                        self.stderr_summary()
                     );
                 }
             };
@@ -243,7 +278,11 @@ impl UciEngine {
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    anyhow::bail!("Engine '{}' exited while waiting for 'bestmove'", self.name);
+                    anyhow::bail!(
+                        "Engine '{}' exited while waiting for 'bestmove'{}",
+                        self.name,
+                        self.stderr_summary()
+                    );
                 }
             };
             debug!("[{}] << {}", self.name, line);
@@ -306,6 +345,28 @@ impl UciEngine {
         let _ = self.send_cmd("quit");
         let _ = self.process.wait();
         Ok(())
+    }
+
+    fn command_error(&self, err: std::io::Error) -> anyhow::Error {
+        anyhow::anyhow!(
+            "Engine '{}' command failed: {}{}",
+            self.name,
+            err,
+            self.stderr_summary()
+        )
+    }
+
+    fn stderr_summary(&self) -> String {
+        let Ok(tail) = self.stderr_tail.lock() else {
+            return String::new();
+        };
+        if tail.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\nRecent stderr:\n{}",
+            tail.iter().cloned().collect::<Vec<_>>().join("\n")
+        )
     }
 }
 

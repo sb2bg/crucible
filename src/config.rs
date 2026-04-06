@@ -71,7 +71,7 @@ pub struct TestingConfig {
     /// SPRT bounds
     #[serde(default)]
     pub sprt: SprtConfig,
-    /// Default opening book (EPD/PGN file path)
+    /// Optional path to a line-based opening list (`startpos` or FEN per line)
     pub opening_book: Option<String>,
     /// How many games between each pair before giving up if SPRT is inconclusive
     #[serde(default = "default_max_games")]

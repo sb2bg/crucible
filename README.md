@@ -138,7 +138,9 @@ Entries under `[[engines]]` are imported automatically when `crucible run` start
 `branches` entries can be exact names or wildcard patterns like `exp/*`, matched against remote `origin/...` branches.
 `experimental_branches` are tested normally, but the default Timeline and Jobs views keep them out of the canonical history and show them in the separate Experiments tab.
 For Zig-based engines, just use a Zig `build_cmd`. The Docker image ships with Zig preinstalled.
-If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it. Runtime config reload applies to future polling cycles, scheduling, idle self-play batches, and new jobs. Running jobs keep the settings they started with.
+If `server.admin_token` is set, the web admin panel sends it as a Bearer token; the browser stores it locally until you clear it.
+
+`testing.opening_book` currently expects a plain text file with one opening per line. Each line must be either `startpos` or a full FEN. Comment lines starting with `#` are ignored. PGN/EPD parsing is not implemented yet.
 
 ## Training Data
 

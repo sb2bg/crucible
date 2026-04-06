@@ -7,7 +7,7 @@
 //! 4. Tagged releases (important milestones)
 //! 5. Sequential fill-in (working backwards from HEAD)
 //!
-//! The scheduler also handles re-prioritizing when new commits are pushed.
+//! The scheduler prioritizes newly discovered work when it schedules fresh jobs.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -164,14 +164,6 @@ impl Scheduler {
         self.storage.insert_test_job(&job)?;
         Ok(job)
     }
-
-    /// Boost priority of all pending jobs for a specific branch
-    /// (called when new commits are pushed to that branch)
-    pub fn reprioritize_branch(&self, _engine_id: &str, _branch: &str) -> Result<()> {
-        // TODO: Bump priority of HEAD commit jobs, demote older ones
-        Ok(())
-    }
-
     fn make_job(&self, dev: &EngineRevision, base: &EngineRevision, priority: i32) -> TestJob {
         let tc = TimeControl {
             base_time_ms: self.config.testing.time_control.base_ms,

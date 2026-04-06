@@ -14,6 +14,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::git::branch_pattern_matches;
 use crate::storage::Storage;
 use crate::types::*;
 
@@ -39,6 +40,10 @@ impl Scheduler {
 
     /// Scan for new commits and create test jobs for them
     pub fn schedule_engine(&self, engine_id: &str) -> Result<Vec<TestJob>> {
+        let engine = self
+            .storage
+            .get_engine_by_id(engine_id)?
+            .ok_or_else(|| anyhow::anyhow!("engine '{}' not found", engine_id))?;
         let revisions = self.storage.get_branch_revisions_for_engine(engine_id)?;
         if revisions.len() < 2 {
             return Ok(Vec::new());
@@ -54,55 +59,43 @@ impl Scheduler {
                 .push(revision);
         }
 
-        for branch_revisions in revisions_by_branch.values_mut() {
+        let canonical_main_head = revisions_by_branch
+            .get("main")
+            .and_then(|revisions| latest_successful_revision(revisions).cloned());
+
+        for (branch_name, branch_revisions) in revisions_by_branch.iter_mut() {
             branch_revisions.sort_by_key(|rev| rev.commit_date);
+            if is_experimental_branch(&engine, branch_name) {
+                let Some(dev) = latest_successful_revision(branch_revisions) else {
+                    continue;
+                };
+                let Some(base) = canonical_main_head.as_ref() else {
+                    continue;
+                };
+                if dev.id == base.id {
+                    continue;
+                }
+                if should_schedule_pair(&self.storage, engine_id, dev, base, JobType::Sequential)? {
+                    new_jobs.push(self.make_job(
+                        dev,
+                        base,
+                        self.compute_priority(dev, branch_revisions),
+                    ));
+                }
+                continue;
+            }
+
             for pair in branch_revisions.windows(2) {
                 let base = &pair[0];
                 let dev = &pair[1];
 
-                if dev.build_status != BuildStatus::Success
-                    || base.build_status != BuildStatus::Success
-                {
-                    continue;
+                if should_schedule_pair(&self.storage, engine_id, dev, base, JobType::Sequential)? {
+                    new_jobs.push(self.make_job(
+                        dev,
+                        base,
+                        self.compute_priority(dev, branch_revisions),
+                    ));
                 }
-
-                if dev.binary_fingerprint.is_some()
-                    && dev.binary_fingerprint == base.binary_fingerprint
-                {
-                    continue;
-                }
-
-                if self
-                    .storage
-                    .has_test_job(engine_id, &dev.id, &base.id, JobType::Sequential)?
-                {
-                    continue;
-                }
-
-                let priority = self.compute_priority(dev, branch_revisions);
-                let tc = TimeControl {
-                    base_time_ms: self.config.testing.time_control.base_ms,
-                    increment_ms: self.config.testing.time_control.increment_ms,
-                    nodes: self.config.testing.time_control.nodes,
-                };
-
-                let job = TestJob {
-                    id: Uuid::new_v4().to_string(),
-                    engine_id: engine_id.to_string(),
-                    dev_revision_id: dev.id.clone(),
-                    base_revision_id: base.id.clone(),
-                    branch_context: Some(dev.branch.clone()),
-                    time_control: tc,
-                    opening_book: self.config.testing.opening_book.clone(),
-                    status: TestStatus::Queued,
-                    priority,
-                    created_at: Utc::now(),
-                    started_at: None,
-                    completed_at: None,
-                    result: None,
-                    job_type: JobType::Sequential,
-                };
-                new_jobs.push(job);
             }
         }
 
@@ -178,6 +171,67 @@ impl Scheduler {
         // TODO: Bump priority of HEAD commit jobs, demote older ones
         Ok(())
     }
+
+    fn make_job(&self, dev: &EngineRevision, base: &EngineRevision, priority: i32) -> TestJob {
+        let tc = TimeControl {
+            base_time_ms: self.config.testing.time_control.base_ms,
+            increment_ms: self.config.testing.time_control.increment_ms,
+            nodes: self.config.testing.time_control.nodes,
+        };
+
+        TestJob {
+            id: Uuid::new_v4().to_string(),
+            engine_id: dev.engine_id.clone(),
+            dev_revision_id: dev.id.clone(),
+            base_revision_id: base.id.clone(),
+            branch_context: Some(dev.branch.clone()),
+            time_control: tc,
+            opening_book: self.config.testing.opening_book.clone(),
+            status: TestStatus::Queued,
+            priority,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            job_type: JobType::Sequential,
+        }
+    }
+}
+
+fn is_experimental_branch(engine: &Engine, branch: &str) -> bool {
+    engine
+        .experimental_branches
+        .iter()
+        .any(|pattern| branch_pattern_matches(pattern, branch))
+}
+
+fn latest_successful_revision(revisions: &[EngineRevision]) -> Option<&EngineRevision> {
+    revisions
+        .iter()
+        .rev()
+        .find(|revision| revision.build_status == BuildStatus::Success)
+}
+
+fn should_schedule_pair(
+    storage: &Storage,
+    engine_id: &str,
+    dev: &EngineRevision,
+    base: &EngineRevision,
+    job_type: JobType,
+) -> Result<bool> {
+    if dev.build_status != BuildStatus::Success || base.build_status != BuildStatus::Success {
+        return Ok(false);
+    }
+
+    if dev.binary_fingerprint.is_some() && dev.binary_fingerprint == base.binary_fingerprint {
+        return Ok(false);
+    }
+
+    if storage.has_test_job(engine_id, &dev.id, &base.id, job_type)? {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -334,6 +388,44 @@ mod tests {
         let jobs = scheduler.schedule_engine(&engine.id)?;
 
         assert!(jobs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_head_runs_against_main_head() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = Engine {
+            branches: vec!["main".into()],
+            experimental_branches: vec!["exp/*".into()],
+            ..test_engine()
+        };
+        storage.insert_engine(&engine)?;
+
+        let shared = test_revision(&engine.id, "main", "base", 0);
+        let mut shared_exp = shared.clone();
+        shared_exp.branch = "exp/nullmove".into();
+
+        let mut main_head = test_revision(&engine.id, "main", "main2", 1);
+        let mut exp_head = test_revision(&engine.id, "exp/nullmove", "exp2", 2);
+        main_head.binary_fingerprint = Some("main-head".into());
+        exp_head.binary_fingerprint = Some("exp-head".into());
+
+        storage.insert_revision(&shared)?;
+        storage.insert_revision(&shared_exp)?;
+        storage.insert_revision(&main_head)?;
+        storage.insert_revision(&exp_head)?;
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert!(jobs.iter().any(|job| {
+            job.dev_revision_id == exp_head.id
+                && job.base_revision_id == main_head.id
+                && job.branch_context.as_deref() == Some("exp/nullmove")
+        }));
+        assert!(!jobs.iter().any(|job| {
+            job.dev_revision_id == exp_head.id && job.base_revision_id == shared.id
+        }));
         Ok(())
     }
 }

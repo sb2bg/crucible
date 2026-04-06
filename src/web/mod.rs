@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         header::{CACHE_CONTROL, CONTENT_TYPE},
-        HeaderMap, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
@@ -17,6 +17,7 @@ use tracing::warn;
 
 use crate::bisect::{BisectRunner, BisectStep};
 use crate::config::Config;
+use crate::export::build_export_bundle;
 use crate::git::{short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
@@ -46,6 +47,7 @@ pub fn create_router(storage: Storage, config: Config) -> Router {
         )
         .route("/api/compare/:engine_id", get(compare_handler))
         .route("/api/admin/engines", post(add_engine_handler))
+        .route("/api/admin/export", get(export_bundle_handler))
         .route(
             "/api/admin/engines/:engine_id",
             delete(delete_engine_handler),
@@ -243,6 +245,48 @@ async fn add_engine_handler(
     match create_or_update_engine(&state, request, branches) {
         Ok(engine) => Json(json!({ "engine": engine })).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
+    }
+}
+
+async fn export_bundle_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
+
+    match build_export_bundle(&state.storage, &state.config) {
+        Ok(bundle) => {
+            let filename = format!(
+                "crucible-export-{}.json",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            );
+            match serde_json::to_vec_pretty(&bundle) {
+                Ok(body) => (
+                    [
+                        (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                        (
+                            axum::http::header::CONTENT_DISPOSITION,
+                            HeaderValue::from_str(&format!(
+                                "attachment; filename=\"{}\"",
+                                filename
+                            ))
+                            .unwrap_or_else(|_| {
+                                HeaderValue::from_static(
+                                    "attachment; filename=\"crucible-export.json\"",
+                                )
+                            }),
+                        ),
+                        (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                    ],
+                    body,
+                )
+                    .into_response(),
+                Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+            }
+        }
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }
 

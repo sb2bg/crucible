@@ -1,6 +1,7 @@
 pub mod bisect;
 pub mod config;
 pub mod engine;
+pub mod export;
 pub mod git;
 pub mod scheduler;
 pub mod sprt;

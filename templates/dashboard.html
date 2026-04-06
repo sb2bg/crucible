@@ -935,6 +935,7 @@
         <input id="admin-token-input" placeholder="admin bearer token" style="min-width:240px;">
         <button type="button" id="save-admin-token">Save token</button>
         <button type="button" id="clear-admin-token">Clear</button>
+        <button type="button" id="download-export">Download export</button>
       </div>
     </div>
 
@@ -1081,6 +1082,7 @@
   document.getElementById('bisect-form').addEventListener('submit', handleBisect);
   document.getElementById('save-admin-token').addEventListener('click', saveAdminToken);
   document.getElementById('clear-admin-token').addEventListener('click', clearAdminToken);
+  document.getElementById('download-export').addEventListener('click', downloadExport);
   document.getElementById('details-close').addEventListener('click', closeDetails);
   document.getElementById('details-backdrop').addEventListener('click', closeDetails);
   document.getElementById('admin-token-input').value = state.adminToken;
@@ -1108,6 +1110,39 @@
       throw new Error(payload.error || response.statusText || 'Request failed');
     }
     return payload;
+  }
+
+  async function downloadExport() {
+    const button = document.getElementById('download-export');
+    setBusy(button, true);
+    try {
+      const headers = {};
+      if (state.adminToken) {
+        headers.Authorization = `Bearer ${state.adminToken}`;
+      }
+      const response = await fetch('/api/admin/export', { headers });
+      if (!response.ok) {
+        const payload = await response.json().catch(async () => ({ error: await response.text() }));
+        throw new Error(payload.error || response.statusText || 'Export failed');
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : 'crucible-export.json';
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast('export downloaded');
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
   }
 
   function openDetailsShell(title, subtitle, bodyHtml) {

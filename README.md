@@ -51,7 +51,7 @@ cargo build --release
 
 The web dashboard is available at `http://localhost:8877` by default.
 
-The dashboard now includes an admin tab for adding/removing engines, queueing manual tests, starting regression hunts, and cancelling queued/running jobs, plus a training tab that summarizes self-play export runs and depth-bucket counts. If you expose it beyond localhost, put it behind an auth layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control.
+The dashboard now includes an admin tab for adding/removing engines, queueing manual tests, starting regression hunts, cancelling queued/running jobs, and downloading a JSON export bundle, plus a training tab that summarizes self-play export runs and depth-bucket counts. If you expose it beyond localhost, put it behind an auth layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control.
 
 ## Docker
 
@@ -159,6 +159,22 @@ crucible selfplay-data \
   --output-dir /data/nnue
 ```
 
+## Exporting Results
+
+You can export the current Crucible state as a single JSON bundle for external analysis or LLM ingestion:
+
+```bash
+crucible export
+```
+
+By default this writes a timestamped file like `crucible-export-20260405T120000Z.json` in the current directory. You can choose a path explicitly:
+
+```bash
+crucible export --output /tmp/crucible.json
+```
+
+The admin tab also has a `Download export` button that returns the same JSON bundle over the web UI.
+
 ## CI/CD
 
 GitHub Actions now includes a workflow that:
@@ -181,6 +197,7 @@ Published images go to `ghcr.io/sb2bg/crucible`.
 | `crucible list`                                           | List tracked engines              |
 | `crucible remove --name <n> [--delete-data]`              | Remove a tracked engine           |
 | `crucible status`                                         | Show current testing status       |
+| `crucible export [--output <path>]`                       | Export results as JSON            |
 | `crucible bisect --engine <n> --good <hash> --bad <hash>` | Start a regression hunt           |
 | `crucible test --engine <n> --dev <hash> --base <hash>`   | Manual one-off test               |
 | `crucible selfplay-data --engine <n> [--revision <hash>]` | Export self-play training data    |

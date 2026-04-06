@@ -12,6 +12,7 @@ use crucible::config::Config;
 use crucible::engine::match_runner::{
     run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
 };
+use crucible::export::build_export_bundle;
 use crucible::git::{short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
@@ -134,6 +135,13 @@ enum Commands {
     Status {
         /// Engine name (optional, shows all if omitted)
         engine: Option<String>,
+    },
+
+    /// Export engine-testing data as a single JSON bundle
+    Export {
+        /// Output file path (default: timestamped json in current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 
     /// Generate an example config file
@@ -473,9 +481,25 @@ async fn main() -> Result<()> {
             println!("  Completed:   {}", status.completed_jobs);
             println!("  Games:       {}", status.total_games_played);
         }
+
+        Commands::Export { output } => {
+            let storage = open_storage(&config)?;
+            let bundle = build_export_bundle(&storage, &config)?;
+            let payload = serde_json::to_vec_pretty(&bundle)?;
+            let output = output.unwrap_or_else(default_export_path);
+            std::fs::write(&output, payload)?;
+            println!("Exported Crucible data to {}", output.display());
+        }
     }
 
     Ok(())
+}
+
+fn default_export_path() -> PathBuf {
+    PathBuf::from(format!(
+        "crucible-export-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ))
 }
 
 /// The main continuous testing loop

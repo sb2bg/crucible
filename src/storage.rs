@@ -877,6 +877,73 @@ impl Storage {
         Ok(jobs)
     }
 
+    pub fn list_all_jobs(&self) -> Result<Vec<JobSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT
+                j.id,
+                j.engine_id,
+                e.name,
+                j.dev_revision_id,
+                dev.commit_hash,
+                j.base_revision_id,
+                base.commit_hash,
+                j.status,
+                j.priority,
+                j.job_type,
+                j.created_at,
+                j.started_at,
+                j.completed_at,
+                j.wins,
+                j.losses,
+                j.draws,
+                j.elo_diff,
+                j.elo_error,
+                j.los,
+                j.sprt_result
+             FROM test_jobs j
+             JOIN engines e ON e.id = j.engine_id
+             JOIN revisions dev ON dev.id = j.dev_revision_id
+             JOIN revisions base ON base.id = j.base_revision_id
+             ORDER BY j.created_at DESC",
+        )?;
+
+        let jobs = stmt
+            .query_map([], |row| {
+                let status_str: String = row.get(7)?;
+                let job_type_str: String = row.get(9)?;
+                let created_at: String = row.get(10)?;
+                let started_at: Option<String> = row.get(11)?;
+                let completed_at: Option<String> = row.get(12)?;
+                let sprt_result: Option<String> = row.get(19)?;
+                Ok(JobSummary {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    engine_name: row.get(2)?,
+                    dev_revision_id: row.get(3)?,
+                    dev_commit_hash: row.get(4)?,
+                    base_revision_id: row.get(5)?,
+                    base_commit_hash: row.get(6)?,
+                    status: decode_test_status(&status_str)?,
+                    priority: row.get(8)?,
+                    job_type: decode_job_type(&job_type_str)?,
+                    created_at: parse_timestamp_column(&created_at, 10)?,
+                    started_at: parse_optional_timestamp_column(started_at, 11)?,
+                    completed_at: parse_optional_timestamp_column(completed_at, 12)?,
+                    wins: row.get(13)?,
+                    losses: row.get(14)?,
+                    draws: row.get(15)?,
+                    elo_diff: row.get(16)?,
+                    elo_error: row.get(17)?,
+                    los: row.get(18)?,
+                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
     pub fn list_jobs_for_revision(
         &self,
         revision_id: &str,
@@ -1051,6 +1118,45 @@ impl Storage {
                     })
                 },
             )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(sessions)
+    }
+
+    pub fn list_all_bisect_sessions(&self) -> Result<Vec<BisectSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, engine_id, good_revision_id, bad_revision_id, commit_range, current_index, current_job_id, phase, pending_indices, probe_history, candidate_revision_id, candidate_index, status, culprit_revision_id
+             FROM bisect_sessions
+             ORDER BY rowid DESC",
+        )?;
+
+        let sessions = stmt
+            .query_map([], |row| {
+                let commit_range: String = row.get(4)?;
+                let current_index: Option<i64> = row.get(5)?;
+                let phase: String = row.get(7)?;
+                let pending_indices: String = row.get(8)?;
+                let probe_history: String = row.get(9)?;
+                let candidate_index: Option<i64> = row.get(11)?;
+                let status: String = row.get(12)?;
+                Ok(BisectSession {
+                    id: row.get(0)?,
+                    engine_id: row.get(1)?,
+                    good_revision_id: row.get(2)?,
+                    bad_revision_id: row.get(3)?,
+                    commit_range: serde_json::from_str(&commit_range).unwrap_or_default(),
+                    current_index: current_index.map(|i| i as usize),
+                    current_job_id: row.get(6)?,
+                    phase: decode_hunt_phase(&phase)?,
+                    pending_indices: serde_json::from_str(&pending_indices).unwrap_or_default(),
+                    probe_history: serde_json::from_str(&probe_history).unwrap_or_default(),
+                    candidate_revision_id: row.get(10)?,
+                    candidate_index: candidate_index.map(|i| i as usize),
+                    status: decode_bisect_status(&status)?,
+                    culprit_revision_id: row.get(13)?,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(sessions)

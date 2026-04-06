@@ -229,9 +229,12 @@ async fn jobs_handler(
     Query(query): Query<LaneQuery>,
 ) -> impl IntoResponse {
     let lane = BranchLane::from_query(query.lane.as_deref());
-    match state.storage.list_recent_jobs(50) {
+    match state.storage.list_all_jobs() {
         Ok(jobs) => match filter_jobs_for_lane(&state, jobs, lane) {
-            Ok(filtered) => Json(json!({ "jobs": filtered })).into_response(),
+            Ok(filtered) => Json(json!({
+                "jobs": filtered.into_iter().take(50).collect::<Vec<_>>()
+            }))
+            .into_response(),
             Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
         },
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
@@ -529,10 +532,7 @@ fn job_matches_lane(state: &WebState, job: &JobSummary, lane: BranchLane) -> any
         return Ok(lane.includes_branch(&engine, branch));
     }
 
-    let mut branches = state.storage.get_revision_branches(&job.dev_revision_id)?;
-    branches.extend(state.storage.get_revision_branches(&job.base_revision_id)?);
-    branches.sort();
-    branches.dedup();
+    let branches = state.storage.get_revision_branches(&job.dev_revision_id)?;
 
     Ok(branches
         .iter()

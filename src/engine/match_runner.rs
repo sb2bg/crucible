@@ -63,6 +63,8 @@ pub struct TaggedTrainingSample {
 pub struct MatchConfig {
     pub dev_binary: std::path::PathBuf,
     pub base_binary: std::path::PathBuf,
+    pub dev_options: Vec<(String, String)>,
+    pub base_options: Vec<(String, String)>,
     pub time_control: TimeControl,
     pub opening_book: Option<Vec<String>>,
     pub sprt_bounds: SprtBounds,
@@ -108,6 +110,8 @@ pub async fn run_match(
             let result = play_single_game(
                 &config.dev_binary,
                 &config.base_binary,
+                &config.dev_options,
+                &config.base_options,
                 opening,
                 &config.time_control,
                 config.hash_mb,
@@ -213,6 +217,8 @@ fn build_test_result(
 async fn play_single_game(
     dev_binary: &Path,
     base_binary: &Path,
+    dev_options: &[(String, String)],
+    base_options: &[(String, String)],
     opening: &str,
     tc: &TimeControl,
     hash_mb: u32,
@@ -224,6 +230,8 @@ async fn play_single_game(
     // Run in a blocking thread since UCI I/O is synchronous
     let dev = dev_binary.to_path_buf();
     let base = base_binary.to_path_buf();
+    let dev_options = dev_options.to_vec();
+    let base_options = base_options.to_vec();
     let opening = opening.to_string();
     let tc = tc.clone();
 
@@ -231,6 +239,8 @@ async fn play_single_game(
         play_game_blocking(
             &dev,
             &base,
+            &dev_options,
+            &base_options,
             &opening,
             &tc,
             hash_mb,
@@ -246,6 +256,8 @@ async fn play_single_game(
 fn play_game_blocking(
     dev_binary: &Path,
     base_binary: &Path,
+    dev_options: &[(String, String)],
+    base_options: &[(String, String)],
     opening: &str,
     tc: &TimeControl,
     hash_mb: u32,
@@ -254,19 +266,22 @@ fn play_game_blocking(
     swap_colors: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(GameResult, String, u32, Vec<TaggedTrainingSample>)> {
-    let (white_bin, black_bin) = if swap_colors {
-        (base_binary, dev_binary)
+    let (white_bin, white_options, black_bin, black_options) = if swap_colors {
+        (base_binary, base_options, dev_binary, dev_options)
     } else {
-        (dev_binary, base_binary)
+        (dev_binary, dev_options, base_binary, base_options)
     };
 
     let mut white = UciEngine::launch(white_bin, "white")?;
     let mut black = UciEngine::launch(black_bin, "black")?;
 
     // Configure engines
-    for engine in [&mut white, &mut black] {
+    for (engine, options) in [(&mut white, white_options), (&mut black, black_options)] {
         engine.set_option("Hash", &hash_mb.to_string())?;
         engine.set_option("Threads", &threads.to_string())?;
+        for (name, value) in options {
+            engine.set_option(name, value)?;
+        }
         engine.ucinewgame()?;
     }
 

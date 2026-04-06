@@ -3,6 +3,7 @@ pub mod chess_rules;
 pub mod config;
 pub mod engine;
 pub mod export;
+pub mod gate;
 pub mod git;
 pub mod scheduler;
 pub mod sprt;

@@ -13,6 +13,7 @@ use crucible::engine::match_runner::{
     run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
 };
 use crucible::export::build_export_bundle;
+use crucible::gate::{GateMatchSummary, GateRunSummary, GateSideSummary};
 use crucible::git::{short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
@@ -137,6 +138,25 @@ enum Commands {
         /// Exact reported search depth to keep in the exported dataset
         #[arg(long, alias = "min-depth")]
         depth: Option<u32>,
+    },
+
+    /// Run a fixed gauntlet gate: candidate and baseline vs the same external suite
+    Gate {
+        /// Engine name
+        #[arg(short, long)]
+        engine: String,
+        /// Candidate revision hash/tag prefix
+        #[arg(long)]
+        candidate: String,
+        /// Baseline revision hash/tag prefix
+        #[arg(long)]
+        baseline: String,
+        /// Gate profile name from config
+        #[arg(long)]
+        profile: String,
+        /// Output JSON file path (default: data_dir/gates/<timestamp>-<profile>.json)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 
     /// Show test results and Elo timeline
@@ -490,6 +510,68 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Gate {
+            engine,
+            candidate,
+            baseline,
+            profile,
+            output,
+        } => {
+            let storage = open_storage(&config)?;
+            let engine = storage
+                .get_engine_by_name(&engine)?
+                .with_context(|| format!("Engine '{}' is not tracked", engine))?;
+            let git_mgr = GitManager::new(
+                &engine.repo_url,
+                &engine.local_path,
+                &engine.build_cmd,
+                &engine.binary_path,
+            );
+            let repo = git_mgr.ensure_repo()?;
+            sync_engine_revisions(&storage, &engine, &git_mgr, &repo)?;
+
+            let candidate_revision = resolve_engine_revision(&storage, &engine, &candidate)?;
+            let baseline_revision = resolve_engine_revision(&storage, &engine, &baseline)?;
+            let gate_profile = resolve_gate_profile(&config, &profile)?;
+
+            let summary = run_release_gate(
+                &config,
+                &engine,
+                &candidate_revision,
+                &baseline_revision,
+                gate_profile,
+            )
+            .await?;
+
+            let output = output.unwrap_or_else(|| default_gate_output_path(&config, &profile));
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
+
+            println!("Release gate complete for '{}'", engine.name);
+            println!(
+                "  Candidate: {} ({:.2}%)",
+                short_hash(&candidate_revision.commit_hash),
+                summary.candidate.score_pct
+            );
+            println!(
+                "  Baseline:  {} ({:.2}%)",
+                short_hash(&baseline_revision.commit_hash),
+                summary.baseline.score_pct
+            );
+            println!(
+                "  H2H:       {} / {} / {} ({:.2}%)",
+                summary.head_to_head.result.wins,
+                summary.head_to_head.result.draws,
+                summary.head_to_head.result.losses,
+                summary.head_to_head.score_pct
+            );
+            println!("  Delta:     {:+.2} pct", summary.score_delta_pct);
+            println!("  Verdict:   {:?}", summary.verdict);
+            println!("  Output:    {}", output.display());
+        }
+
         Commands::Status { engine: _ } => {
             let storage = open_storage(&config)?;
             let status = storage.get_system_status()?;
@@ -520,6 +602,14 @@ fn default_export_path() -> PathBuf {
     PathBuf::from(format!(
         "crucible-export-{}.json",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ))
+}
+
+fn default_gate_output_path(config: &Config, profile: &str) -> PathBuf {
+    config.data_dir.join("gates").join(format!(
+        "{}-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        profile
     ))
 }
 
@@ -704,6 +794,184 @@ fn resolve_selfplay_revision(
                 engine.name
             )
         })
+}
+
+fn resolve_engine_revision(
+    storage: &Storage,
+    engine: &Engine,
+    revision: &str,
+) -> Result<crucible::types::EngineRevision> {
+    storage
+        .get_revision_by_ref_prefix(&engine.id, revision)?
+        .with_context(|| format!("Could not resolve revision '{}'", revision))
+}
+
+fn resolve_gate_profile<'a>(
+    config: &'a Config,
+    profile_name: &str,
+) -> Result<&'a crucible::config::GateProfileConfig> {
+    config
+        .gate
+        .profiles
+        .iter()
+        .find(|profile| profile.name == profile_name)
+        .with_context(|| format!("Unknown gate profile '{}'", profile_name))
+}
+
+async fn run_release_gate(
+    config: &Config,
+    engine: &Engine,
+    candidate_revision: &crucible::types::EngineRevision,
+    baseline_revision: &crucible::types::EngineRevision,
+    profile: &crucible::config::GateProfileConfig,
+) -> Result<GateRunSummary> {
+    let candidate_binary = candidate_revision.binary_path.clone().with_context(|| {
+        format!(
+            "Candidate revision '{}' is missing a built binary",
+            candidate_revision.commit_hash
+        )
+    })?;
+    let baseline_binary = baseline_revision.binary_path.clone().with_context(|| {
+        format!(
+            "Baseline revision '{}' is missing a built binary",
+            baseline_revision.commit_hash
+        )
+    })?;
+    let time_control = profile
+        .time_control
+        .as_ref()
+        .map(|tc| TimeControl {
+            base_time_ms: tc.base_ms,
+            increment_ms: tc.increment_ms,
+            nodes: tc.nodes,
+        })
+        .unwrap_or_else(|| configured_time_control(config));
+    let opening_book = load_opening_book(
+        profile
+            .opening_book
+            .as_deref()
+            .or(config.testing.opening_book.as_deref()),
+    )?;
+    let fixed_length_bounds = SprtBounds {
+        elo0: config.testing.sprt.elo0,
+        elo1: config.testing.sprt.elo1,
+        alpha: config.testing.sprt.alpha,
+        beta: config.testing.sprt.beta,
+        min_games: profile.games_per_opponent.saturating_add(1),
+    };
+    let candidate_matches = run_gate_side(
+        config,
+        &candidate_binary,
+        "candidate",
+        &profile.opponents,
+        &opening_book,
+        &time_control,
+        fixed_length_bounds,
+        profile.games_per_opponent,
+    )
+    .await?;
+    let baseline_matches = run_gate_side(
+        config,
+        &baseline_binary,
+        "baseline",
+        &profile.opponents,
+        &opening_book,
+        &time_control,
+        fixed_length_bounds,
+        profile.games_per_opponent,
+    )
+    .await?;
+    info!(
+        "Gate head-to-head {} vs {}",
+        short_hash(&candidate_revision.commit_hash),
+        short_hash(&baseline_revision.commit_hash)
+    );
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let head_to_head = run_match(
+        MatchConfig {
+            dev_binary: candidate_binary.clone(),
+            base_binary: baseline_binary.clone(),
+            dev_options: Vec::new(),
+            base_options: Vec::new(),
+            time_control: time_control.clone(),
+            opening_book: opening_book.clone(),
+            sprt_bounds: fixed_length_bounds,
+            max_games: profile.games_per_opponent,
+            hash_mb: config.testing.hash_mb,
+            threads: config.testing.engine_threads,
+            cancel_flag: None,
+        },
+        event_tx,
+    )
+    .await?;
+
+    Ok(GateRunSummary::new(
+        engine.name.clone(),
+        profile.name.clone(),
+        GateSideSummary::from_matches(
+            candidate_revision.id.clone(),
+            candidate_revision.commit_hash.clone(),
+            candidate_matches,
+        ),
+        GateSideSummary::from_matches(
+            baseline_revision.id.clone(),
+            baseline_revision.commit_hash.clone(),
+            baseline_matches,
+        ),
+        head_to_head,
+        profile.min_score_delta,
+    ))
+}
+
+async fn run_gate_side(
+    config: &Config,
+    tested_binary: &std::path::Path,
+    side_label: &str,
+    opponent_names: &[String],
+    opening_book: &Option<Vec<String>>,
+    time_control: &TimeControl,
+    sprt_bounds: SprtBounds,
+    games_per_opponent: u32,
+) -> Result<Vec<GateMatchSummary>> {
+    let mut summaries = Vec::new();
+
+    for opponent_name in opponent_names {
+        let opponent = config
+            .gate
+            .opponents
+            .iter()
+            .find(|opponent| opponent.name == *opponent_name)
+            .with_context(|| format!("Unknown gate opponent '{}'", opponent_name))?;
+        info!("Gate {} vs {}", side_label, opponent.name);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let result = run_match(
+            MatchConfig {
+                dev_binary: tested_binary.to_path_buf(),
+                base_binary: opponent.binary_path.clone(),
+                dev_options: Vec::new(),
+                base_options: opponent
+                    .options
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+                time_control: time_control.clone(),
+                opening_book: opening_book.clone(),
+                sprt_bounds,
+                max_games: games_per_opponent,
+                hash_mb: config.testing.hash_mb,
+                threads: config.testing.engine_threads,
+                cancel_flag: None,
+            },
+            event_tx,
+        )
+        .await?;
+        summaries.push(GateMatchSummary {
+            opponent_name: opponent.name.clone(),
+            result,
+        });
+    }
+
+    Ok(summaries)
 }
 
 struct IdleSelfplayTask {
@@ -968,6 +1236,8 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         MatchConfig {
             dev_binary,
             base_binary,
+            dev_options: Vec::new(),
+            base_options: Vec::new(),
             time_control: job.time_control.clone(),
             opening_book: load_opening_book(
                 job.opening_book

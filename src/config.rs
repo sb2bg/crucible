@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,9 @@ pub struct Config {
 
     #[serde(default)]
     pub training: TrainingConfig,
+
+    #[serde(default)]
+    pub gate: GateConfig,
 
     #[serde(default)]
     pub engines: Vec<EngineConfig>,
@@ -134,6 +138,39 @@ pub struct TrainingConfig {
     pub idle_selfplay: bool,
     #[serde(default = "default_idle_batch_games")]
     pub idle_batch_games: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GateConfig {
+    #[serde(default)]
+    pub opponents: Vec<GateOpponentConfig>,
+    #[serde(default)]
+    pub profiles: Vec<GateProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateOpponentConfig {
+    pub name: String,
+    pub binary_path: PathBuf,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateProfileConfig {
+    pub name: String,
+    pub opponents: Vec<String>,
+    #[serde(default = "default_gate_games_per_opponent")]
+    pub games_per_opponent: u32,
+    #[serde(default)]
+    pub time_control: Option<TimeControlConfig>,
+    pub opening_book: Option<String>,
+    #[serde(default)]
+    pub min_score_delta: f64,
+}
+
+fn default_gate_games_per_opponent() -> u32 {
+    100
 }
 
 fn default_training_output_dir() -> PathBuf {
@@ -267,6 +304,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             testing: TestingConfig::default(),
             training: TrainingConfig::default(),
+            gate: GateConfig::default(),
             engines: Vec::new(),
         }
     }
@@ -310,6 +348,28 @@ impl Config {
                 ..Default::default()
             },
             training: TrainingConfig::default(),
+            gate: GateConfig {
+                opponents: vec![
+                    GateOpponentConfig {
+                        name: "Stockfish".into(),
+                        binary_path: PathBuf::from("/opt/engines/stockfish"),
+                        options: BTreeMap::new(),
+                    },
+                    GateOpponentConfig {
+                        name: "Ethereal".into(),
+                        binary_path: PathBuf::from("/opt/engines/ethereal"),
+                        options: BTreeMap::new(),
+                    },
+                ],
+                profiles: vec![GateProfileConfig {
+                    name: "release".into(),
+                    opponents: vec!["Stockfish".into(), "Ethereal".into()],
+                    games_per_opponent: default_gate_games_per_opponent(),
+                    time_control: None,
+                    opening_book: None,
+                    min_score_delta: 0.0,
+                }],
+            },
             engines: vec![EngineConfig {
                 name: "my-engine".into(),
                 repo: "https://github.com/user/chess-engine".into(),
@@ -350,6 +410,57 @@ impl Config {
         }
         if self.training.idle_batch_games == 0 {
             anyhow::bail!("training.idle_batch_games must be at least 1");
+        }
+        let opponent_names = self
+            .gate
+            .opponents
+            .iter()
+            .map(|opponent| opponent.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for opponent in &self.gate.opponents {
+            if opponent.name.trim().is_empty() {
+                anyhow::bail!("gate opponent names cannot be empty");
+            }
+        }
+        for profile in &self.gate.profiles {
+            if profile.name.trim().is_empty() {
+                anyhow::bail!("gate profile names cannot be empty");
+            }
+            if profile.opponents.is_empty() {
+                anyhow::bail!(
+                    "gate profile '{}' must reference at least one opponent",
+                    profile.name
+                );
+            }
+            if profile.games_per_opponent == 0 {
+                anyhow::bail!(
+                    "gate profile '{}' must set games_per_opponent to at least 1",
+                    profile.name
+                );
+            }
+            for opponent in &profile.opponents {
+                if !opponent_names.contains(opponent.as_str()) {
+                    anyhow::bail!(
+                        "gate profile '{}' references unknown opponent '{}'",
+                        profile.name,
+                        opponent
+                    );
+                }
+            }
+            if let Some(tc) = &profile.time_control {
+                if tc.base_ms == 0 && tc.nodes.is_none() {
+                    anyhow::bail!(
+                        "gate profile '{}' time control must specify positive base_ms or nodes",
+                        profile.name
+                    );
+                }
+                if matches!(tc.nodes, Some(0)) {
+                    anyhow::bail!(
+                        "gate profile '{}' time control nodes must be greater than 0 when set",
+                        profile.name
+                    );
+                }
+            }
         }
         if self.testing.time_control.base_ms == 0 && self.testing.time_control.nodes.is_none() {
             anyhow::bail!("time control must specify positive base_ms or nodes");

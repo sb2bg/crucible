@@ -22,6 +22,7 @@ Crucible is built for the solo dev. One command, your machine, your engine, your
 - **Dual UI** — Terminal (TUI) for quick monitoring, web dashboard for deep dives and charts.
 - **PGN Archive** — Every game is saved and browsable.
 - **Self-Play Data Export** — Generate NNUE-style JSONL data from self-play and bucket it by reported search depth under engine/revision-specific directories.
+- **Release Gate** — Compare a candidate revision and a baseline revision against the same configured gauntlet of external engines before tagging a release.
 - **Zero Dependencies** — Single binary, SQLite storage, embedded web UI. No Docker, no Django, no external services.
 
 ## Quick Start
@@ -113,6 +114,20 @@ regression_min_depth = 10
 idle_selfplay = false
 idle_batch_games = 1
 
+[[gate.opponents]]
+name = "Stockfish"
+binary_path = "/opt/engines/stockfish"
+
+[[gate.opponents]]
+name = "Ethereal"
+binary_path = "/opt/engines/ethereal"
+
+[[gate.profiles]]
+name = "release"
+opponents = ["Stockfish", "Ethereal"]
+games_per_opponent = 100
+min_score_delta = 0.0
+
 [testing.time_control]
 base_ms = 10000            # 10+0.1 STC
 increment_ms = 100
@@ -170,6 +185,41 @@ crucible selfplay-data \
 ```
 
 When `training.idle_selfplay = true`, Crucible uses spare worker slots for short self-play batches whenever there are no queued test jobs. That lets the server keep generating training data in the background instead of idling.
+
+## Release Gates
+
+You can define named gauntlet profiles in config and compare a candidate revision against a baseline revision over the same external opponent suite:
+
+```bash
+crucible gate \
+  --engine Sykora \
+  --candidate exp/iir-off \
+  --baseline v0.2.2 \
+  --profile release
+```
+
+Each gate profile references configured opponent binaries and runs a fixed number of games per opponent for both the candidate and the baseline. It also runs a direct candidate-vs-baseline head-to-head under the same game budget. Crucible writes a JSON summary under `.crucible/gates/` by default, including:
+
+- per-opponent W/D/L for candidate and baseline
+- direct head-to-head W/D/L for candidate vs baseline
+- aggregate score percentage for each side
+- overall score delta in percentage points
+- a simple `Pass` / `Fail` / `Tie` verdict based on `min_score_delta`
+
+Gate profiles can also set a dedicated `opening_book` and override the default time control:
+
+```toml
+[[gate.profiles]]
+name = "release"
+opponents = ["Stockfish", "Ethereal"]
+games_per_opponent = 200
+min_score_delta = 1.0
+opening_book = "openings/gate.fens"
+
+[gate.profiles.time_control]
+base_ms = 30000
+increment_ms = 300
+```
 
 ## Exporting Results
 

@@ -333,7 +333,10 @@ impl Storage {
 
     pub fn get_engines(&self) -> Result<Vec<Engine>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT * FROM engines")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, repo_url, local_path, branches, experimental_branches, build_cmd, binary_path, start_from
+             FROM engines",
+        )?;
         let engines = stmt
             .query_map([], |row| {
                 let branches_str: String = row.get(4)?;
@@ -1788,6 +1791,58 @@ mod tests {
             .get_engine_by_id(&engine.id)?
             .expect("engine exists");
         assert_eq!(stored.experimental_branches, vec!["exp/*"]);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_engine_rows_correctly_after_migrating_old_column_order() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        Storage::configure_connection(&conn)?;
+        conn.execute_batch(
+            "
+            CREATE TABLE engines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                repo_url TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                branches TEXT NOT NULL,
+                build_cmd TEXT NOT NULL,
+                binary_path TEXT NOT NULL,
+                start_from TEXT
+            );
+            ",
+        )?;
+
+        let storage = Storage {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        storage.migrate()?;
+
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO engines (id, name, repo_url, local_path, branches, build_cmd, binary_path, start_from, experimental_branches)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "engine-1",
+                    "engine",
+                    "https://example.invalid/repo.git",
+                    "/tmp/engine",
+                    "[\"main\"]",
+                    "make",
+                    "engine",
+                    "v1.0.0",
+                    "[\"exp/*\"]",
+                ],
+            )?;
+        }
+
+        let stored = storage.get_engines()?;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].build_cmd, "make");
+        assert_eq!(stored[0].binary_path, "engine");
+        assert_eq!(stored[0].start_from.as_deref(), Some("v1.0.0"));
+        assert_eq!(stored[0].experimental_branches, vec!["exp/*"]);
         Ok(())
     }
 

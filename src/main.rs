@@ -645,113 +645,130 @@ async fn run_test_loop(storage: Storage, shared_config: SharedConfig) {
         Err(err) => tracing::error!("Failed to recover interrupted jobs: {}", err),
     }
 
+    let mut workers = tokio::task::JoinSet::new();
+    let mut last_poll_at = tokio::time::Instant::now();
+    let mut first_poll = true;
+
     loop {
         let config = current_config(&shared_config);
         let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
-        // 1. For each tracked engine, fetch latest commits
-        let engines = match storage.get_engines() {
-            Ok(e) => e,
-            Err(err) => {
-                tracing::error!("Failed to get engines: {}", err);
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    config.testing.poll_interval_seconds,
-                ))
-                .await;
-                continue;
-            }
-        };
+        let poll_interval = std::time::Duration::from_secs(config.testing.poll_interval_seconds);
 
-        for engine in &engines {
-            // Clone/fetch repo, enumerate commits, build, schedule tests
-            let git_mgr = GitManager::new(
-                &engine.repo_url,
-                &engine.local_path,
-                &engine.build_cmd,
-                &engine.binary_path,
+        if first_poll || last_poll_at.elapsed() >= poll_interval {
+            sync_and_schedule_engines(&storage, &config);
+            last_poll_at = tokio::time::Instant::now();
+            first_poll = false;
+        }
+
+        fill_worker_slots(&mut workers, &storage, &config, worker_count);
+
+        let next_poll_at = last_poll_at + poll_interval;
+        if workers.is_empty() {
+            let sleep_for = std::cmp::min(
+                next_poll_at.saturating_duration_since(tokio::time::Instant::now()),
+                std::time::Duration::from_secs(1),
             );
+            tokio::time::sleep(sleep_for).await;
+            continue;
+        }
 
-            match git_mgr.ensure_repo() {
-                Ok(repo) => {
-                    if let Err(e) = sync_engine_revisions(&storage, engine, &git_mgr, &repo) {
-                        tracing::error!("Failed to sync revisions for '{}': {}", engine.name, e);
+        tokio::select! {
+            result = workers.join_next() => {
+                if let Some(result) = result {
+                    if let Err(err) = result {
+                        tracing::error!("Job worker task panicked: {}", err);
                     }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to access repo for '{}': {}", engine.name, e);
                 }
             }
+            _ = tokio::time::sleep_until(next_poll_at) => {}
+        }
+    }
+}
 
-            // Schedule and run test jobs
-            let scheduler = Scheduler::new(storage.clone(), config.clone());
-            match scheduler.schedule_engine(&engine.id) {
-                Ok(jobs) => {
-                    for job in &jobs {
-                        let _ = storage.insert_test_job(job);
-                    }
-                    if !jobs.is_empty() {
-                        info!(
-                            "Scheduled {} new test jobs for '{}'",
-                            jobs.len(),
-                            engine.name
-                        );
-                    }
+fn sync_and_schedule_engines(storage: &Storage, config: &Config) {
+    let engines = match storage.get_engines() {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!("Failed to get engines: {}", err);
+            return;
+        }
+    };
+
+    for engine in &engines {
+        let git_mgr = GitManager::new(
+            &engine.repo_url,
+            &engine.local_path,
+            &engine.build_cmd,
+            &engine.binary_path,
+        );
+
+        match git_mgr.ensure_repo() {
+            Ok(repo) => {
+                if let Err(e) = sync_engine_revisions(storage, engine, &git_mgr, &repo) {
+                    tracing::error!("Failed to sync revisions for '{}': {}", engine.name, e);
                 }
-                Err(e) => {
-                    tracing::error!("Scheduler error for '{}': {}", engine.name, e);
-                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to access repo for '{}': {}", engine.name, e);
             }
         }
 
-        // 2. Process queued jobs
-        let mut workers = tokio::task::JoinSet::new();
-        loop {
-            while workers.len() < worker_count {
-                match storage.claim_next_job() {
-                    Ok(Some(job)) => {
-                        let job_storage = storage.clone();
-                        let job_config = config.clone();
-                        workers.spawn(async move {
-                            process_claimed_job(job_storage, job_config, job).await;
-                        });
-                    }
-                    Ok(None) => break,
-                    Err(err) => {
-                        tracing::error!("Failed to claim next job: {}", err);
-                        break;
-                    }
+        let scheduler = Scheduler::new(storage.clone(), config.clone());
+        match scheduler.schedule_engine(&engine.id) {
+            Ok(jobs) => {
+                for job in &jobs {
+                    let _ = storage.insert_test_job(job);
+                }
+                if !jobs.is_empty() {
+                    info!(
+                        "Scheduled {} new test jobs for '{}'",
+                        jobs.len(),
+                        engine.name
+                    );
                 }
             }
+            Err(e) => {
+                tracing::error!("Scheduler error for '{}': {}", engine.name, e);
+            }
+        }
+    }
+}
 
-            while workers.len() < worker_count
-                && config.training.idle_selfplay
-                && !has_pending_test_jobs(&storage)
-            {
-                let Some(task) = next_idle_selfplay_task(&storage, &config) else {
-                    break;
-                };
+fn fill_worker_slots(
+    workers: &mut tokio::task::JoinSet<()>,
+    storage: &Storage,
+    config: &Config,
+    worker_count: usize,
+) {
+    while workers.len() < worker_count {
+        match storage.claim_next_job() {
+            Ok(Some(job)) => {
+                let job_storage = storage.clone();
+                let job_config = config.clone();
                 workers.spawn(async move {
-                    if let Err(err) = run_idle_selfplay_batch(task).await {
-                        tracing::error!("Idle self-play batch failed: {}", err);
-                    }
+                    process_claimed_job(job_storage, job_config, job).await;
                 });
             }
-
-            if workers.is_empty() {
+            Ok(None) => break,
+            Err(err) => {
+                tracing::error!("Failed to claim next job: {}", err);
                 break;
             }
-
-            if let Some(result) = workers.join_next().await {
-                if let Err(err) = result {
-                    tracing::error!("Job worker task panicked: {}", err);
-                }
-            }
         }
+    }
 
-        // Sleep before next polling cycle
-        tokio::time::sleep(std::time::Duration::from_secs(
-            config.testing.poll_interval_seconds,
-        ))
-        .await;
+    while workers.len() < worker_count
+        && config.training.idle_selfplay
+        && !has_pending_test_jobs(storage)
+    {
+        let Some(task) = next_idle_selfplay_task(storage, config) else {
+            break;
+        };
+        workers.spawn(async move {
+            if let Err(err) = run_idle_selfplay_batch(task).await {
+                tracing::error!("Idle self-play batch failed: {}", err);
+            }
+        });
     }
 }
 

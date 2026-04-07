@@ -1,8 +1,16 @@
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 
+use crate::config::{Config, GateProfileConfig};
+use crate::engine::match_runner::{run_match, MatchConfig};
+use crate::sprt::SprtBounds;
 use crate::sprt::{elo_error, los, wdl_to_elo};
-use crate::types::TestResult;
+use crate::types::{Engine, EngineRevision, TestResult, TimeControl};
+use crate::workflow::configured_time_control;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateMatchSummary {
@@ -48,6 +56,22 @@ pub struct GateRunSummary {
     pub score_delta_pct: f64,
     pub min_score_delta: f64,
     pub verdict: GateVerdict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRunRecord {
+    #[serde(flatten)]
+    pub summary: GateRunSummary,
+    pub output_path: PathBuf,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateProfileSummary {
+    pub name: String,
+    pub opponents: Vec<String>,
+    pub games_per_opponent: u32,
+    pub min_score_delta: f64,
 }
 
 impl GateSideSummary {
@@ -126,6 +150,333 @@ impl GateHeadToHeadSummary {
         };
 
         Self { result, score_pct }
+    }
+}
+
+pub fn resolve_gate_profile<'a>(
+    config: &'a Config,
+    profile_name: &str,
+) -> Result<&'a GateProfileConfig> {
+    config
+        .gate
+        .profiles
+        .iter()
+        .find(|profile| profile.name == profile_name)
+        .with_context(|| format!("Unknown gate profile '{}'", profile_name))
+}
+
+pub fn default_gate_output_path(data_dir: &Path, profile: &str) -> PathBuf {
+    data_dir.join("gates").join(format!(
+        "{}-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        profile
+    ))
+}
+
+pub fn list_gate_runs(data_dir: &Path) -> Result<Vec<GateRunRecord>> {
+    let gate_dir = data_dir.join("gates");
+    if !gate_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut runs = Vec::new();
+    for entry in fs::read_dir(&gate_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+
+        let summary: GateRunSummary = serde_json::from_slice(&fs::read(&path)?)?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        runs.push(GateRunRecord {
+            summary,
+            output_path: path,
+            file_name,
+        });
+    }
+
+    runs.sort_by(|left, right| {
+        right
+            .summary
+            .generated_at
+            .cmp(&left.summary.generated_at)
+            .then_with(|| right.file_name.cmp(&left.file_name))
+    });
+    Ok(runs)
+}
+
+pub fn write_gate_summary(output: &Path, summary: &GateRunSummary) -> Result<()> {
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, serde_json::to_vec_pretty(summary)?)?;
+    Ok(())
+}
+
+pub fn gate_profile_summaries(config: &Config) -> Vec<GateProfileSummary> {
+    config
+        .gate
+        .profiles
+        .iter()
+        .map(|profile| GateProfileSummary {
+            name: profile.name.clone(),
+            opponents: profile.opponents.clone(),
+            games_per_opponent: profile.games_per_opponent,
+            min_score_delta: profile.min_score_delta,
+        })
+        .collect()
+}
+
+pub async fn run_release_gate(
+    config: &Config,
+    engine: &Engine,
+    candidate_revision: &EngineRevision,
+    baseline_revision: &EngineRevision,
+    profile: &GateProfileConfig,
+) -> Result<GateRunSummary> {
+    let candidate_binary = candidate_revision.binary_path.clone().with_context(|| {
+        format!(
+            "Candidate revision '{}' is missing a built binary",
+            candidate_revision.commit_hash
+        )
+    })?;
+    let baseline_binary = baseline_revision.binary_path.clone().with_context(|| {
+        format!(
+            "Baseline revision '{}' is missing a built binary",
+            baseline_revision.commit_hash
+        )
+    })?;
+    let time_control = profile
+        .time_control
+        .as_ref()
+        .map(|tc| TimeControl {
+            base_time_ms: tc.base_ms,
+            increment_ms: tc.increment_ms,
+            nodes: tc.nodes,
+        })
+        .unwrap_or_else(|| configured_time_control(config));
+    let opening_book = load_opening_book(
+        profile
+            .opening_book
+            .as_deref()
+            .or(config.testing.opening_book.as_deref()),
+    )?;
+    let fixed_length_bounds = SprtBounds {
+        elo0: config.testing.sprt.elo0,
+        elo1: config.testing.sprt.elo1,
+        alpha: config.testing.sprt.alpha,
+        beta: config.testing.sprt.beta,
+        min_games: profile.games_per_opponent.saturating_add(1),
+    };
+    let (candidate_matches, baseline_matches, head_to_head) = run_gate_tasks(
+        config,
+        &candidate_binary,
+        &baseline_binary,
+        &profile.opponents,
+        &opening_book,
+        &time_control,
+        fixed_length_bounds,
+        profile.games_per_opponent,
+    )
+    .await?;
+
+    Ok(GateRunSummary::new(
+        engine.name.clone(),
+        profile.name.clone(),
+        GateSideSummary::from_matches(
+            candidate_revision.id.clone(),
+            candidate_revision.commit_hash.clone(),
+            candidate_matches,
+        ),
+        GateSideSummary::from_matches(
+            baseline_revision.id.clone(),
+            baseline_revision.commit_hash.clone(),
+            baseline_matches,
+        ),
+        head_to_head,
+        profile.min_score_delta,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateTaskKind {
+    CandidateVsOpponent(usize),
+    BaselineVsOpponent(usize),
+    HeadToHead,
+}
+
+async fn run_gate_tasks(
+    config: &Config,
+    candidate_binary: &Path,
+    baseline_binary: &Path,
+    opponent_names: &[String],
+    opening_book: &Option<Vec<String>>,
+    time_control: &TimeControl,
+    sprt_bounds: SprtBounds,
+    games_per_opponent: u32,
+) -> Result<(Vec<GateMatchSummary>, Vec<GateMatchSummary>, TestResult)> {
+    let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
+    let mut tasks = Vec::new();
+    for (index, opponent_name) in opponent_names.iter().enumerate() {
+        let opponent = config
+            .gate
+            .opponents
+            .iter()
+            .find(|opponent| opponent.name == *opponent_name)
+            .with_context(|| format!("Unknown gate opponent '{}'", opponent_name))?;
+        tasks.push((
+            GateTaskKind::CandidateVsOpponent(index),
+            MatchConfig {
+                dev_binary: candidate_binary.to_path_buf(),
+                base_binary: opponent.binary_path.clone(),
+                dev_options: Vec::new(),
+                base_options: opponent
+                    .options
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+                time_control: time_control.clone(),
+                opening_book: opening_book.clone(),
+                sprt_bounds,
+                max_games: games_per_opponent,
+                hash_mb: config.testing.hash_mb,
+                threads: config.testing.engine_threads,
+                cancel_flag: None,
+            },
+        ));
+        tasks.push((
+            GateTaskKind::BaselineVsOpponent(index),
+            MatchConfig {
+                dev_binary: baseline_binary.to_path_buf(),
+                base_binary: opponent.binary_path.clone(),
+                dev_options: Vec::new(),
+                base_options: opponent
+                    .options
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+                time_control: time_control.clone(),
+                opening_book: opening_book.clone(),
+                sprt_bounds,
+                max_games: games_per_opponent,
+                hash_mb: config.testing.hash_mb,
+                threads: config.testing.engine_threads,
+                cancel_flag: None,
+            },
+        ));
+    }
+
+    tasks.push((
+        GateTaskKind::HeadToHead,
+        MatchConfig {
+            dev_binary: candidate_binary.to_path_buf(),
+            base_binary: baseline_binary.to_path_buf(),
+            dev_options: Vec::new(),
+            base_options: Vec::new(),
+            time_control: time_control.clone(),
+            opening_book: opening_book.clone(),
+            sprt_bounds,
+            max_games: games_per_opponent,
+            hash_mb: config.testing.hash_mb,
+            threads: config.testing.engine_threads,
+            cancel_flag: None,
+        },
+    ));
+
+    let mut candidate_results = vec![None; opponent_names.len()];
+    let mut baseline_results = vec![None; opponent_names.len()];
+    let mut head_to_head = None;
+    let mut pending = tasks.into_iter();
+    let mut workers = tokio::task::JoinSet::new();
+
+    loop {
+        while workers.len() < worker_count {
+            let Some((kind, match_config)) = pending.next() else {
+                break;
+            };
+            workers.spawn(async move {
+                let (event_tx, _event_rx) = mpsc::unbounded_channel();
+                let result = run_match(match_config, event_tx).await;
+                (kind, result)
+            });
+        }
+
+        let Some(joined) = workers.join_next().await else {
+            break;
+        };
+        let (kind, result) = joined.map_err(|err| anyhow!("gate task panicked: {}", err))?;
+        let result = result?;
+
+        match kind {
+            GateTaskKind::CandidateVsOpponent(index) => {
+                candidate_results[index] = Some(GateMatchSummary {
+                    opponent_name: opponent_names[index].clone(),
+                    result,
+                });
+            }
+            GateTaskKind::BaselineVsOpponent(index) => {
+                baseline_results[index] = Some(GateMatchSummary {
+                    opponent_name: opponent_names[index].clone(),
+                    result,
+                });
+            }
+            GateTaskKind::HeadToHead => {
+                head_to_head = Some(result);
+            }
+        }
+    }
+
+    let candidate_matches = candidate_results
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            summary.with_context(|| {
+                format!(
+                    "missing candidate gate result for opponent '{}'",
+                    opponent_names[index]
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let baseline_matches = baseline_results
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            summary.with_context(|| {
+                format!(
+                    "missing baseline gate result for opponent '{}'",
+                    opponent_names[index]
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let head_to_head = head_to_head.context("missing gate head-to-head result")?;
+
+    Ok((candidate_matches, baseline_matches, head_to_head))
+}
+
+fn load_opening_book(path: Option<&str>) -> Result<Option<Vec<String>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read opening book '{}'", path))?;
+    let openings = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if openings.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(openings))
     }
 }
 

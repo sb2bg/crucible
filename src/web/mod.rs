@@ -18,6 +18,10 @@ use tracing::warn;
 use crate::bisect::{BisectRunner, BisectStep};
 use crate::config::Config;
 use crate::export::build_export_bundle;
+use crate::gate::{
+    default_gate_output_path, gate_profile_summaries, list_gate_runs, resolve_gate_profile,
+    run_release_gate, write_gate_summary,
+};
 use crate::git::{branch_pattern_matches, short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
@@ -49,6 +53,14 @@ pub fn create_router(storage: Storage, config: Arc<RwLock<Config>>) -> Router {
         .route("/api/compare/:engine_id", get(compare_handler))
         .route("/api/admin/engines", post(add_engine_handler))
         .route("/api/admin/export", get(export_bundle_handler))
+        .route(
+            "/api/admin/gates",
+            get(list_gate_runs_handler).post(start_gate_handler),
+        )
+        .route(
+            "/api/admin/gates/:file_name",
+            get(download_gate_run_handler),
+        )
         .route(
             "/api/admin/engines/:engine_id",
             delete(delete_engine_handler),
@@ -87,6 +99,14 @@ struct StartBisectRequest {
     engine_id: String,
     good: String,
     bad: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartGateRequest {
+    engine_id: String,
+    candidate: String,
+    baseline: String,
+    profile: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +281,24 @@ async fn training_runs_handler(State(state): State<Arc<WebState>>) -> impl IntoR
     }
 }
 
+async fn list_gate_runs_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
+    let config = current_config(&state);
+    match list_gate_runs(&config.data_dir) {
+        Ok(runs) => Json(json!({
+            "profiles": gate_profile_summaries(&config),
+            "runs": runs
+        }))
+        .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    }
+}
+
 async fn revision_details_handler(
     State(state): State<Arc<WebState>>,
     Path((engine_id, revision_ref)): Path<(String, String)>,
@@ -279,6 +317,41 @@ async fn compare_handler(
     match load_compare_details(&state, &engine_id, &query.base, &query.head) {
         Ok(payload) => Json(serde_json::to_value(payload).unwrap()).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
+    }
+}
+
+async fn download_gate_run_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(file_name): Path<String>,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
+    if file_name.contains('/') || file_name.contains('\\') || !file_name.ends_with(".json") {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("invalid gate result file name"),
+        );
+    }
+    let config = current_config(&state);
+    let path = config.data_dir.join("gates").join(&file_name);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(
+                "content-disposition",
+                HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file_name))
+                    .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+            );
+            (headers, bytes).into_response()
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json_error(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("gate result not found"),
+        ),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }
 
@@ -318,6 +391,103 @@ async fn add_engine_handler(
         Ok(engine) => Json(json!({ "engine": engine })).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
     }
+}
+
+async fn start_gate_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<StartGateRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
+
+    let config = current_config(&state);
+    let engine = match state.storage.get_engine_by_id(&request.engine_id) {
+        Ok(Some(engine)) => engine,
+        Ok(None) => {
+            return json_error(StatusCode::NOT_FOUND, anyhow::anyhow!("engine not found"));
+        }
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    };
+    let candidate = match state
+        .storage
+        .get_revision_by_ref_prefix(&engine.id, request.candidate.trim())
+    {
+        Ok(Some(revision)) => revision,
+        Ok(None) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("could not resolve candidate revision"),
+            );
+        }
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    };
+    let baseline = match state
+        .storage
+        .get_revision_by_ref_prefix(&engine.id, request.baseline.trim())
+    {
+        Ok(Some(revision)) => revision,
+        Ok(None) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("could not resolve baseline revision"),
+            );
+        }
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
+    };
+    let profile = match resolve_gate_profile(&config, request.profile.trim()) {
+        Ok(profile) => profile.clone(),
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
+    };
+
+    let profile_name = profile.name.clone();
+    let output_path = default_gate_output_path(&config.data_dir, &profile_name);
+    let file_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("gate.json")
+        .to_string();
+    let engine_for_task = engine.clone();
+    let candidate_for_task = candidate.clone();
+    let baseline_for_task = baseline.clone();
+    tokio::spawn(async move {
+        match run_release_gate(
+            &config,
+            &engine_for_task,
+            &candidate_for_task,
+            &baseline_for_task,
+            &profile,
+        )
+        .await
+        {
+            Ok(summary) => {
+                if let Err(err) = write_gate_summary(&output_path, &summary) {
+                    tracing::error!("Failed to write gate summary to {:?}: {}", output_path, err);
+                }
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Gate run failed for '{}' candidate {} baseline {} profile {}: {}",
+                    engine_for_task.name,
+                    short_hash(&candidate_for_task.commit_hash),
+                    short_hash(&baseline_for_task.commit_hash),
+                    profile.name,
+                    err
+                );
+            }
+        }
+    });
+
+    Json(json!({
+        "started": true,
+        "file_name": file_name,
+        "engine_name": engine.name,
+        "candidate": candidate.commit_hash,
+        "baseline": baseline.commit_hash,
+        "profile": profile_name
+    }))
+    .into_response()
 }
 
 async fn export_bundle_handler(

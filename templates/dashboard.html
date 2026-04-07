@@ -488,6 +488,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .form-grid.three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   label {
     display: grid;
     gap: 6px;
@@ -742,6 +746,7 @@
     .statusbar { justify-content: flex-start; }
     .stats,
     .form-grid.two,
+    .form-grid.three,
     .kv-grid,
     .summary-grid { grid-template-columns: 1fr; }
   }
@@ -772,6 +777,7 @@
     <button class="tab" data-tab="experiments">Experiments</button>
     <button class="tab" data-tab="bisect">Bisect</button>
     <button class="tab" data-tab="training">Training</button>
+    <button class="tab" data-tab="gate">Gate</button>
     <button class="tab" data-tab="admin">Admin</button>
   </div>
 
@@ -970,6 +976,71 @@
     <div class="empty hidden" id="training-empty">No training-data runs found.</div>
   </section>
 
+  <section class="panel" id="panel-gate">
+    <div class="stack">
+      <div class="panel-head" style="margin-bottom:0;">
+        <div>
+          <h2 class="panel-title">Gate</h2>
+          <p class="panel-subtitle">admin-only release gauntlets against configured opponent profiles</p>
+        </div>
+        <button type="button" id="refresh-gates">Refresh</button>
+      </div>
+
+      <form class="form-card" id="gate-form">
+        <h3 class="form-title">Run gate</h3>
+        <div class="form-grid">
+          <div class="form-grid three">
+            <label>
+              engine
+              <select name="engine_id" id="gate-engine" required></select>
+            </label>
+            <label>
+              candidate
+              <input name="candidate" placeholder="exp/iir-off or 6494932a" required>
+            </label>
+            <label>
+              baseline
+              <input name="baseline" placeholder="v0.2.2 or 548c7989" required>
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>
+              profile
+              <select name="profile" id="gate-profile" required></select>
+            </label>
+            <label>
+              profile details
+              <div class="meta" id="gate-profile-meta">No gate profiles loaded.</div>
+            </label>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button class="button-primary" type="submit">Start gate</button>
+        </div>
+      </form>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Engine</th>
+              <th>Profile</th>
+              <th>Candidate</th>
+              <th>Baseline</th>
+              <th>Delta</th>
+              <th>Verdict</th>
+              <th>H2H</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="gates-body"></tbody>
+        </table>
+      </div>
+      <div class="empty hidden" id="gates-empty">No gate runs found.</div>
+    </div>
+  </section>
+
   <section class="panel" id="panel-admin">
     <div class="panel-head">
       <div>
@@ -1115,6 +1186,7 @@
     chartCache: {},
     activeTab: 'overview',
     adminToken: localStorage.getItem('crucible.adminToken') || '',
+    gateProfiles: [],
     details: null
   };
 
@@ -1131,12 +1203,15 @@
   });
   document.getElementById('refresh-bisect').addEventListener('click', loadBisect);
   document.getElementById('refresh-training').addEventListener('click', loadTrainingRuns);
+  document.getElementById('refresh-gates').addEventListener('click', loadGateRuns);
   document.getElementById('overview-engine-select').addEventListener('change', () => loadTimeline('overview'));
   document.getElementById('timeline-engine-select').addEventListener('change', () => loadTimeline('timeline'));
   document.getElementById('experiments-engine-select').addEventListener('change', () => loadTimeline('experiments'));
   document.getElementById('add-engine-form').addEventListener('submit', handleAddEngine);
   document.getElementById('manual-test-form').addEventListener('submit', handleManualTest);
   document.getElementById('bisect-form').addEventListener('submit', handleBisect);
+  document.getElementById('gate-form').addEventListener('submit', handleGate);
+  document.getElementById('gate-profile').addEventListener('change', updateGateProfileMeta);
   document.getElementById('save-admin-token').addEventListener('click', saveAdminToken);
   document.getElementById('clear-admin-token').addEventListener('click', clearAdminToken);
   document.getElementById('download-export').addEventListener('click', downloadExport);
@@ -1286,6 +1361,7 @@
     }
     if (tabName === 'bisect') loadBisect();
     if (tabName === 'training') loadTrainingRuns();
+    if (tabName === 'gate') loadGateRuns();
     if (tabName === 'timeline') loadTimeline('timeline');
     if (tabName === 'admin') renderAdminEngineList();
   }
@@ -1300,6 +1376,7 @@
     }
     if (state.activeTab === 'bisect') loadBisect();
     if (state.activeTab === 'training') loadTrainingRuns();
+    if (state.activeTab === 'gate') loadGateRuns();
     if (state.activeTab === 'timeline') loadTimeline('timeline');
     loadTimeline('overview');
   }
@@ -1348,7 +1425,8 @@
       document.getElementById('timeline-engine-select'),
       document.getElementById('experiments-engine-select'),
       document.getElementById('manual-test-engine'),
-      document.getElementById('bisect-engine')
+      document.getElementById('bisect-engine'),
+      document.getElementById('gate-engine')
     ];
 
     selects.forEach(select => {
@@ -1373,6 +1451,44 @@
       const exists = state.engines.some(engine => engine.id === previousValue);
       select.value = exists ? previousValue : state.engines[0].id;
     });
+  }
+
+  function populateGateProfiles() {
+    const select = document.getElementById('gate-profile');
+    const previousValue = select.value;
+    select.innerHTML = '';
+    if (!state.gateProfiles.length) {
+      select.disabled = true;
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No profiles';
+      select.appendChild(option);
+      updateGateProfileMeta();
+      return;
+    }
+
+    select.disabled = false;
+    state.gateProfiles.forEach(profile => {
+      const option = document.createElement('option');
+      option.value = profile.name;
+      option.textContent = profile.name;
+      select.appendChild(option);
+    });
+    const exists = state.gateProfiles.some(profile => profile.name === previousValue);
+    select.value = exists ? previousValue : state.gateProfiles[0].name;
+    updateGateProfileMeta();
+  }
+
+  function updateGateProfileMeta() {
+    const select = document.getElementById('gate-profile');
+    const meta = document.getElementById('gate-profile-meta');
+    const profile = state.gateProfiles.find(candidate => candidate.name === select.value);
+    if (!profile) {
+      meta.textContent = 'No gate profiles loaded.';
+      return;
+    }
+    const opponents = (profile.opponents || []).join(', ');
+    meta.textContent = `${profile.games_per_opponent} games/opponent • min delta ${Number(profile.min_score_delta || 0).toFixed(1)} • ${opponents}`;
   }
 
   function renderOverviewEngineGrid() {
@@ -1728,6 +1844,55 @@
         </tr>
       `).join('');
     } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  async function loadGateRuns() {
+    try {
+      const payload = await api('/api/admin/gates');
+      state.gateProfiles = payload.profiles || [];
+      populateGateProfiles();
+      const runs = payload.runs || [];
+      const body = document.getElementById('gates-body');
+      const empty = document.getElementById('gates-empty');
+      if (!runs.length) {
+        body.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+
+      empty.classList.add('hidden');
+      body.innerHTML = runs.map(run => {
+        const summary = run.summary || run;
+        const delta = Number(summary.score_delta_pct || 0);
+        const h2h = summary.head_to_head?.result || {};
+        const h2hScore = Number(summary.head_to_head?.score_pct || 0).toFixed(1);
+        return `
+          <tr>
+            <td title="${escapeHtml(summary.generated_at)}">${timeAgo(summary.generated_at)}</td>
+            <td>${escapeHtml(summary.engine_name || '')}</td>
+            <td>${escapeHtml(summary.profile_name || '')}</td>
+            <td class="mono">${escapeHtml((summary.candidate?.commit_hash || '').slice(0, 8))}</td>
+            <td class="mono">${escapeHtml((summary.baseline?.commit_hash || '').slice(0, 8))}</td>
+            <td><span class="${delta >= 0 ? 'positive' : 'negative'} mono">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%</span></td>
+            <td><span class="badge badge-${String(summary.verdict || 'tie').toLowerCase()}">${escapeHtml(summary.verdict || 'Tie')}</span></td>
+            <td class="mono">${Number(h2h.wins || 0)} / ${Number(h2h.draws || 0)} / ${Number(h2h.losses || 0)} • ${h2hScore}%</td>
+            <td>
+              <div class="inline-actions">
+                <button class="button-inline" type="button" data-download-gate="${escapeHtmlAttr(run.file_name || '')}">Download</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      body.querySelectorAll('[data-download-gate]').forEach(button => {
+        button.addEventListener('click', () => downloadGateRun(button.dataset.downloadGate, button));
+      });
+    } catch (error) {
+      state.gateProfiles = [];
+      populateGateProfiles();
       showToast(error.message, 'error');
     }
   }
@@ -2160,6 +2325,34 @@
     }
   }
 
+  async function handleGate(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    setBusy(button, true);
+    try {
+      const data = new FormData(form);
+      const payload = {
+        engine_id: String(data.get('engine_id') || ''),
+        candidate: String(data.get('candidate') || '').trim(),
+        baseline: String(data.get('baseline') || '').trim(),
+        profile: String(data.get('profile') || '').trim()
+      };
+      const result = await api('/api/admin/gates', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      showToast(`started gate ${result.profile} for ${result.engine_name}`);
+      form.querySelector('input[name="candidate"]').value = '';
+      form.querySelector('input[name="baseline"]').value = '';
+      await loadGateRuns();
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function deleteEngine(engineId, button) {
     if (!confirm('Delete this engine and all stored history?')) return;
     setBusy(button, true);
@@ -2200,6 +2393,35 @@
     }
   }
 
+  async function downloadGateRun(fileName, button) {
+    setBusy(button, true);
+    try {
+      const headers = {};
+      if (state.adminToken) {
+        headers.Authorization = `Bearer ${state.adminToken}`;
+      }
+      const response = await fetch(`/api/admin/gates/${encodeURIComponent(fileName)}`, { headers });
+      if (!response.ok) {
+        const payload = await response.json().catch(async () => ({ error: await response.text() }));
+        throw new Error(payload.error || response.statusText || 'Gate download failed');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName || 'gate.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast('gate result downloaded');
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function refreshAfterMutation() {
     state.chartCache = {};
     await Promise.allSettled([
@@ -2208,7 +2430,8 @@
       loadJobs('canonical'),
       loadJobs('experimental', 'experiments-jobs-body', 'experiments-jobs-empty'),
       loadBisect(),
-      loadTrainingRuns()
+      loadTrainingRuns(),
+      loadGateRuns()
     ]);
     loadTimeline('overview');
     if (state.activeTab === 'timeline') loadTimeline('timeline');

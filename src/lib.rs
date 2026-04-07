@@ -12,3 +12,4 @@ pub mod training;
 pub mod tui;
 pub mod types;
 pub mod web;
+pub mod workflow;

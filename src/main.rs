@@ -27,6 +27,7 @@ use crucible::types::{
     BisectStatus, BuildStatus, Engine, JobType, ProbeVerdict, TestJob, TestResult, TestStatus,
     TimeControl,
 };
+use crucible::workflow::{configured_time_control, queue_bisect_probe, sync_engine_revisions};
 
 type SharedConfig = Arc<RwLock<Config>>;
 
@@ -551,23 +552,42 @@ async fn main() -> Result<()> {
 
             println!("Release gate complete for '{}'", engine.name);
             println!(
-                "  Candidate: {} ({:.2}%)",
+                "  Candidate: {}  W{} D{} L{}  {:.2}%  Elo {:+.1} +/- {:.1}  LOS {:.1}%",
                 short_hash(&candidate_revision.commit_hash),
-                summary.candidate.score_pct
+                summary.candidate.wins,
+                summary.candidate.draws,
+                summary.candidate.losses,
+                summary.candidate.score_pct,
+                summary.candidate.elo_diff,
+                summary.candidate.elo_error,
+                summary.candidate.los * 100.0,
             );
             println!(
-                "  Baseline:  {} ({:.2}%)",
+                "  Baseline:  {}  W{} D{} L{}  {:.2}%  Elo {:+.1} +/- {:.1}  LOS {:.1}%",
                 short_hash(&baseline_revision.commit_hash),
-                summary.baseline.score_pct
+                summary.baseline.wins,
+                summary.baseline.draws,
+                summary.baseline.losses,
+                summary.baseline.score_pct,
+                summary.baseline.elo_diff,
+                summary.baseline.elo_error,
+                summary.baseline.los * 100.0,
             );
             println!(
-                "  H2H:       {} / {} / {} ({:.2}%)",
+                "  H2H:       W{} D{} L{}  {:.2}%  Elo {:+.1} +/- {:.1}  LOS {:.1}%  {:?}",
                 summary.head_to_head.result.wins,
                 summary.head_to_head.result.draws,
                 summary.head_to_head.result.losses,
-                summary.head_to_head.score_pct
+                summary.head_to_head.score_pct,
+                summary.head_to_head.result.elo_diff,
+                summary.head_to_head.result.elo_error,
+                summary.head_to_head.result.los * 100.0,
+                summary.head_to_head.result.sprt_result,
             );
-            println!("  Delta:     {:+.2} pct", summary.score_delta_pct);
+            println!(
+                "  Delta:     {:+.2} pct (candidate vs baseline suite score)",
+                summary.score_delta_pct
+            );
             println!("  Verdict:   {:?}", summary.verdict);
             println!("  Output:    {}", output.display());
         }
@@ -859,49 +879,15 @@ async fn run_release_gate(
         beta: config.testing.sprt.beta,
         min_games: profile.games_per_opponent.saturating_add(1),
     };
-    let candidate_matches = run_gate_side(
+    let (candidate_matches, baseline_matches, head_to_head) = run_gate_tasks(
         config,
         &candidate_binary,
-        "candidate",
-        &profile.opponents,
-        &opening_book,
-        &time_control,
-        fixed_length_bounds,
-        profile.games_per_opponent,
-    )
-    .await?;
-    let baseline_matches = run_gate_side(
-        config,
         &baseline_binary,
-        "baseline",
         &profile.opponents,
         &opening_book,
         &time_control,
         fixed_length_bounds,
         profile.games_per_opponent,
-    )
-    .await?;
-    info!(
-        "Gate head-to-head {} vs {}",
-        short_hash(&candidate_revision.commit_hash),
-        short_hash(&baseline_revision.commit_hash)
-    );
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let head_to_head = run_match(
-        MatchConfig {
-            dev_binary: candidate_binary.clone(),
-            base_binary: baseline_binary.clone(),
-            dev_options: Vec::new(),
-            base_options: Vec::new(),
-            time_control: time_control.clone(),
-            opening_book: opening_book.clone(),
-            sprt_bounds: fixed_length_bounds,
-            max_games: profile.games_per_opponent,
-            hash_mb: config.testing.hash_mb,
-            threads: config.testing.engine_threads,
-            cancel_flag: None,
-        },
-        event_tx,
     )
     .await?;
 
@@ -923,30 +909,37 @@ async fn run_release_gate(
     ))
 }
 
-async fn run_gate_side(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateTaskKind {
+    CandidateVsOpponent(usize),
+    BaselineVsOpponent(usize),
+    HeadToHead,
+}
+
+async fn run_gate_tasks(
     config: &Config,
-    tested_binary: &std::path::Path,
-    side_label: &str,
+    candidate_binary: &std::path::Path,
+    baseline_binary: &std::path::Path,
     opponent_names: &[String],
     opening_book: &Option<Vec<String>>,
     time_control: &TimeControl,
     sprt_bounds: SprtBounds,
     games_per_opponent: u32,
-) -> Result<Vec<GateMatchSummary>> {
-    let mut summaries = Vec::new();
-
-    for opponent_name in opponent_names {
+) -> Result<(Vec<GateMatchSummary>, Vec<GateMatchSummary>, TestResult)> {
+    let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
+    let mut tasks = Vec::new();
+    for (index, opponent_name) in opponent_names.iter().enumerate() {
         let opponent = config
             .gate
             .opponents
             .iter()
             .find(|opponent| opponent.name == *opponent_name)
             .with_context(|| format!("Unknown gate opponent '{}'", opponent_name))?;
-        info!("Gate {} vs {}", side_label, opponent.name);
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let result = run_match(
+        tasks.push((
+            GateTaskKind::CandidateVsOpponent(index),
+            opponent.name.clone(),
             MatchConfig {
-                dev_binary: tested_binary.to_path_buf(),
+                dev_binary: candidate_binary.to_path_buf(),
                 base_binary: opponent.binary_path.clone(),
                 dev_options: Vec::new(),
                 base_options: opponent
@@ -962,16 +955,119 @@ async fn run_gate_side(
                 threads: config.testing.engine_threads,
                 cancel_flag: None,
             },
-            event_tx,
-        )
-        .await?;
-        summaries.push(GateMatchSummary {
-            opponent_name: opponent.name.clone(),
-            result,
-        });
+        ));
+        tasks.push((
+            GateTaskKind::BaselineVsOpponent(index),
+            opponent.name.clone(),
+            MatchConfig {
+                dev_binary: baseline_binary.to_path_buf(),
+                base_binary: opponent.binary_path.clone(),
+                dev_options: Vec::new(),
+                base_options: opponent
+                    .options
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+                time_control: time_control.clone(),
+                opening_book: opening_book.clone(),
+                sprt_bounds,
+                max_games: games_per_opponent,
+                hash_mb: config.testing.hash_mb,
+                threads: config.testing.engine_threads,
+                cancel_flag: None,
+            },
+        ));
     }
 
-    Ok(summaries)
+    tasks.push((
+        GateTaskKind::HeadToHead,
+        "candidate vs baseline".to_string(),
+        MatchConfig {
+            dev_binary: candidate_binary.to_path_buf(),
+            base_binary: baseline_binary.to_path_buf(),
+            dev_options: Vec::new(),
+            base_options: Vec::new(),
+            time_control: time_control.clone(),
+            opening_book: opening_book.clone(),
+            sprt_bounds,
+            max_games: games_per_opponent,
+            hash_mb: config.testing.hash_mb,
+            threads: config.testing.engine_threads,
+            cancel_flag: None,
+        },
+    ));
+
+    let mut candidate_results = vec![None; opponent_names.len()];
+    let mut baseline_results = vec![None; opponent_names.len()];
+    let mut head_to_head = None;
+    let mut pending = tasks.into_iter();
+    let mut workers = tokio::task::JoinSet::new();
+
+    loop {
+        while workers.len() < worker_count {
+            let Some((kind, label, match_config)) = pending.next() else {
+                break;
+            };
+            info!("Gate {}", label);
+            workers.spawn(async move {
+                let (event_tx, _event_rx) = mpsc::unbounded_channel();
+                let result = run_match(match_config, event_tx).await;
+                (kind, label, result)
+            });
+        }
+
+        let Some(joined) = workers.join_next().await else {
+            break;
+        };
+        let (kind, label, result) = joined.map_err(|err| anyhow!("gate task panicked: {}", err))?;
+        let result = result.with_context(|| format!("gate task '{}' failed", label))?;
+
+        match kind {
+            GateTaskKind::CandidateVsOpponent(index) => {
+                candidate_results[index] = Some(GateMatchSummary {
+                    opponent_name: opponent_names[index].clone(),
+                    result,
+                });
+            }
+            GateTaskKind::BaselineVsOpponent(index) => {
+                baseline_results[index] = Some(GateMatchSummary {
+                    opponent_name: opponent_names[index].clone(),
+                    result,
+                });
+            }
+            GateTaskKind::HeadToHead => {
+                head_to_head = Some(result);
+            }
+        }
+    }
+
+    let candidate_matches = candidate_results
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            summary.with_context(|| {
+                format!(
+                    "missing candidate gate result for opponent '{}'",
+                    opponent_names[index]
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let baseline_matches = baseline_results
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            summary.with_context(|| {
+                format!(
+                    "missing baseline gate result for opponent '{}'",
+                    opponent_names[index]
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let head_to_head = head_to_head.context("missing gate head-to-head result")?;
+
+    Ok((candidate_matches, baseline_matches, head_to_head))
 }
 
 struct IdleSelfplayTask {
@@ -1090,14 +1186,6 @@ async fn process_claimed_job(storage: Storage, config: Config, job: TestJob) {
     }
 }
 
-fn configured_time_control(config: &Config) -> TimeControl {
-    TimeControl {
-        base_time_ms: config.testing.time_control.base_ms,
-        increment_ms: config.testing.time_control.increment_ms,
-        nodes: config.testing.time_control.nodes,
-    }
-}
-
 fn configured_sprt_bounds(config: &Config, job_type: JobType) -> SprtBounds {
     match job_type {
         JobType::Bisect => SprtBounds::regression(),
@@ -1109,63 +1197,6 @@ fn configured_sprt_bounds(config: &Config, job_type: JobType) -> SprtBounds {
             min_games: config.testing.sprt.min_games,
         },
     }
-}
-
-fn sync_engine_revisions(
-    storage: &Storage,
-    engine: &Engine,
-    git_mgr: &GitManager,
-    repo: &git2::Repository,
-) -> Result<()> {
-    let branches = git_mgr.resolve_branch_patterns(
-        repo,
-        &[
-            engine.branches.clone(),
-            engine.experimental_branches.clone(),
-        ]
-        .concat(),
-    )?;
-    for branch in &branches {
-        let revisions =
-            git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;
-        info!(
-            "Engine '{}' branch '{}': {} commits",
-            engine.name,
-            branch,
-            revisions.len()
-        );
-        for revision in &revisions {
-            storage.insert_revision(revision)?;
-        }
-    }
-
-    let revisions = storage.get_revisions_for_engine(&engine.id)?;
-    for revision in revisions
-        .iter()
-        .filter(|r| r.build_status == BuildStatus::Pending)
-    {
-        match git_mgr.build_revision(repo, &revision.commit_hash) {
-            Ok(binary) => {
-                let fingerprint = GitManager::fingerprint_binary(&binary)?;
-                storage.update_build_status(
-                    &revision.id,
-                    BuildStatus::Success,
-                    Some(&binary),
-                    Some(&fingerprint),
-                )?;
-            }
-            Err(err) => {
-                warn!(
-                    "Build failed for {}: {}",
-                    short_hash(&revision.commit_hash),
-                    err
-                );
-                storage.update_build_status(&revision.id, BuildStatus::Failed, None, None)?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Result<TestResult> {
@@ -1507,28 +1538,5 @@ fn advance_bisect_after_job(
         }
     }
 
-    Ok(())
-}
-
-fn queue_bisect_probe(
-    storage: &Storage,
-    bisect_runner: &BisectRunner,
-    session: &mut crucible::types::BisectSession,
-    engine_id: &str,
-    baseline_revision_id: &str,
-    commit_hash: &str,
-    config: &Config,
-) -> Result<()> {
-    let test_revision = storage
-        .get_revision_by_hash_prefix(engine_id, commit_hash)?
-        .with_context(|| format!("Could not resolve bisect probe '{}'", commit_hash))?;
-    let job = bisect_runner.create_bisect_job(
-        engine_id,
-        &test_revision.id,
-        baseline_revision_id,
-        configured_time_control(config),
-    );
-    session.current_job_id = Some(job.id.clone());
-    storage.insert_test_job(&job)?;
     Ok(())
 }

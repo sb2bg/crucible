@@ -22,7 +22,8 @@ use crate::git::{branch_pattern_matches, short_hash, CommitDetails, DiffSummary,
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
 use crate::training::list_training_runs;
-use crate::types::{Engine, EngineRevision, JobSummary, TestStatus, TimeControl};
+use crate::types::{Engine, EngineRevision, JobSummary, TestStatus};
+use crate::workflow::{queue_bisect_probe, sync_engine_revisions};
 
 pub struct WebState {
     pub storage: Storage,
@@ -506,14 +507,6 @@ fn create_or_update_engine(
     Ok(engine)
 }
 
-fn combined_tracked_branches(engine: &Engine) -> Vec<String> {
-    let mut combined = engine.branches.clone();
-    combined.extend(engine.experimental_branches.clone());
-    combined.sort();
-    combined.dedup();
-    combined
-}
-
 fn engine_branch_is_experimental(engine: &Engine, branch: &str) -> bool {
     engine
         .experimental_branches
@@ -571,7 +564,7 @@ fn queue_manual_test(
         &engine.binary_path,
     );
     let repo = git_mgr.ensure_repo()?;
-    sync_engine_revisions(state, &engine, &git_mgr, &repo)?;
+    sync_engine_revisions(&state.storage, &engine, &git_mgr, &repo)?;
 
     let dev_revision = state
         .storage
@@ -610,7 +603,7 @@ fn start_bisect(
         &engine.binary_path,
     );
     let repo = git_mgr.ensure_repo()?;
-    sync_engine_revisions(state, &engine, &git_mgr, &repo)?;
+    sync_engine_revisions(&state.storage, &engine, &git_mgr, &repo)?;
 
     let good_revision = state
         .storage
@@ -637,12 +630,13 @@ fn start_bisect(
             ..
         }) => {
             queue_bisect_probe(
-                state,
+                &state.storage,
                 &bisect_runner,
                 &mut session,
                 &engine.id,
                 &good_revision.id,
                 &commit_hash,
+                &current_config(state),
             )?;
             state.storage.insert_bisect_session(&session)?;
             json!({
@@ -823,86 +817,6 @@ fn lineage_ref(revision: &EngineRevision) -> LineageRef {
         branch: revision.branch.clone(),
         tag: revision.tag.clone(),
         binary_fingerprint: revision.binary_fingerprint.clone(),
-    }
-}
-
-fn sync_engine_revisions(
-    state: &WebState,
-    engine: &Engine,
-    git_mgr: &GitManager,
-    repo: &git2::Repository,
-) -> anyhow::Result<()> {
-    let branches = git_mgr.resolve_branch_patterns(repo, &combined_tracked_branches(engine))?;
-    for branch in &branches {
-        let revisions =
-            git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;
-        for revision in &revisions {
-            state.storage.insert_revision(revision)?;
-        }
-    }
-
-    let revisions = state.storage.get_revisions_for_engine(&engine.id)?;
-    for revision in revisions
-        .iter()
-        .filter(|revision| revision.build_status == crate::types::BuildStatus::Pending)
-    {
-        match git_mgr.build_revision(repo, &revision.commit_hash) {
-            Ok(binary) => {
-                let fingerprint = GitManager::fingerprint_binary(&binary)?;
-                state.storage.update_build_status(
-                    &revision.id,
-                    crate::types::BuildStatus::Success,
-                    Some(&binary),
-                    Some(&fingerprint),
-                )?;
-            }
-            Err(err) => {
-                warn!(
-                    "Build failed for {} during web sync: {}",
-                    short_hash(&revision.commit_hash),
-                    err
-                );
-                state.storage.update_build_status(
-                    &revision.id,
-                    crate::types::BuildStatus::Failed,
-                    None,
-                    None,
-                )?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn queue_bisect_probe(
-    state: &WebState,
-    bisect_runner: &BisectRunner,
-    session: &mut crate::types::BisectSession,
-    engine_id: &str,
-    baseline_revision_id: &str,
-    commit_hash: &str,
-) -> anyhow::Result<()> {
-    let test_revision = state
-        .storage
-        .get_revision_by_hash_prefix(engine_id, commit_hash)?
-        .ok_or_else(|| anyhow::anyhow!("could not resolve bisect probe"))?;
-    let job = bisect_runner.create_bisect_job(
-        engine_id,
-        &test_revision.id,
-        baseline_revision_id,
-        configured_time_control(&current_config(&state)),
-    );
-    session.current_job_id = Some(job.id.clone());
-    state.storage.insert_test_job(&job)?;
-    Ok(())
-}
-
-fn configured_time_control(config: &Config) -> TimeControl {
-    TimeControl {
-        base_time_ms: config.testing.time_control.base_ms,
-        increment_ms: config.testing.time_control.increment_ms,
-        nodes: config.testing.time_control.nodes,
     }
 }
 

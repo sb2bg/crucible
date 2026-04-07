@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::sprt::{elo_error, los, wdl_to_elo};
 use crate::types::TestResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,9 @@ pub struct GateSideSummary {
     pub draws: u32,
     pub losses: u32,
     pub score_pct: f64,
+    pub elo_diff: f64,
+    pub elo_error: f64,
+    pub los: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,9 @@ impl GateSideSummary {
         } else {
             ((wins as f64) + 0.5 * (draws as f64)) / (total as f64) * 100.0
         };
+        let elo_diff = wdl_to_elo(wins, draws, losses);
+        let elo_error = elo_error(wins, draws, losses);
+        let los = los(wins, losses);
 
         Self {
             revision_id,
@@ -70,6 +77,9 @@ impl GateSideSummary {
             draws,
             losses,
             score_pct,
+            elo_diff,
+            elo_error,
+            los,
         }
     }
 }
@@ -157,6 +167,9 @@ mod tests {
         assert_eq!(summary.draws, 3);
         assert_eq!(summary.losses, 1);
         assert!((summary.score_pct - 68.75).abs() < 1e-6);
+        assert!(summary.elo_diff.is_finite());
+        assert!(summary.elo_error.is_finite());
+        assert!((0.0..=1.0).contains(&summary.los));
     }
 
     #[test]

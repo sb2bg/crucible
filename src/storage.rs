@@ -4,7 +4,7 @@
 //! The database is the source of truth for the Elo timeline.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Params, Row, TransactionBehavior};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +15,33 @@ use crate::types::*;
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
 }
+
+const JOB_SUMMARY_SELECT: &str = "SELECT
+        j.id,
+        j.engine_id,
+        e.name,
+        j.dev_revision_id,
+        dev.commit_hash,
+        j.base_revision_id,
+        base.commit_hash,
+        j.branch_context,
+        j.status,
+        j.priority,
+        j.job_type,
+        j.created_at,
+        j.started_at,
+        j.completed_at,
+        j.wins,
+        j.losses,
+        j.draws,
+        j.elo_diff,
+        j.elo_error,
+        j.los,
+        j.sprt_result
+     FROM test_jobs j
+     JOIN engines e ON e.id = j.engine_id
+     JOIN revisions dev ON dev.id = j.dev_revision_id
+     JOIN revisions base ON base.id = j.base_revision_id";
 
 impl Storage {
     pub fn open(path: &Path) -> Result<Self> {
@@ -886,142 +913,13 @@ impl Storage {
     }
 
     pub fn list_recent_jobs(&self, limit: usize) -> Result<Vec<JobSummary>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT
-                j.id,
-                j.engine_id,
-                e.name,
-                j.dev_revision_id,
-                dev.commit_hash,
-                j.base_revision_id,
-                base.commit_hash,
-                j.branch_context,
-                j.status,
-                j.priority,
-                j.job_type,
-                j.created_at,
-                j.started_at,
-                j.completed_at,
-                j.wins,
-                j.losses,
-                j.draws,
-                j.elo_diff,
-                j.elo_error,
-                j.los,
-                j.sprt_result
-             FROM test_jobs j
-             JOIN engines e ON e.id = j.engine_id
-             JOIN revisions dev ON dev.id = j.dev_revision_id
-             JOIN revisions base ON base.id = j.base_revision_id
-             ORDER BY j.created_at DESC
-             LIMIT ?1",
-        )?;
-
-        let jobs = stmt
-            .query_map(params![limit as i64], |row| {
-                let status_str: String = row.get(8)?;
-                let job_type_str: String = row.get(10)?;
-                let created_at: String = row.get(11)?;
-                let started_at: Option<String> = row.get(12)?;
-                let completed_at: Option<String> = row.get(13)?;
-                let sprt_result: Option<String> = row.get(20)?;
-                Ok(JobSummary {
-                    id: row.get(0)?,
-                    engine_id: row.get(1)?,
-                    engine_name: row.get(2)?,
-                    dev_revision_id: row.get(3)?,
-                    dev_commit_hash: row.get(4)?,
-                    base_revision_id: row.get(5)?,
-                    base_commit_hash: row.get(6)?,
-                    branch_context: row.get(7)?,
-                    status: decode_test_status(&status_str)?,
-                    priority: row.get(9)?,
-                    job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 11)?,
-                    started_at: parse_optional_timestamp_column(started_at, 12)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
-                    wins: row.get(14)?,
-                    losses: row.get(15)?,
-                    draws: row.get(16)?,
-                    elo_diff: row.get(17)?,
-                    elo_error: row.get(18)?,
-                    los: row.get(19)?,
-                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        let sql = format!("{JOB_SUMMARY_SELECT} ORDER BY j.created_at DESC LIMIT ?1");
+        self.list_job_summaries(&sql, params![limit as i64])
     }
 
     pub fn list_all_jobs(&self) -> Result<Vec<JobSummary>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT
-                j.id,
-                j.engine_id,
-                e.name,
-                j.dev_revision_id,
-                dev.commit_hash,
-                j.base_revision_id,
-                base.commit_hash,
-                j.branch_context,
-                j.status,
-                j.priority,
-                j.job_type,
-                j.created_at,
-                j.started_at,
-                j.completed_at,
-                j.wins,
-                j.losses,
-                j.draws,
-                j.elo_diff,
-                j.elo_error,
-                j.los,
-                j.sprt_result
-             FROM test_jobs j
-             JOIN engines e ON e.id = j.engine_id
-             JOIN revisions dev ON dev.id = j.dev_revision_id
-             JOIN revisions base ON base.id = j.base_revision_id
-             ORDER BY j.created_at DESC",
-        )?;
-
-        let jobs = stmt
-            .query_map([], |row| {
-                let status_str: String = row.get(8)?;
-                let job_type_str: String = row.get(10)?;
-                let created_at: String = row.get(11)?;
-                let started_at: Option<String> = row.get(12)?;
-                let completed_at: Option<String> = row.get(13)?;
-                let sprt_result: Option<String> = row.get(20)?;
-                Ok(JobSummary {
-                    id: row.get(0)?,
-                    engine_id: row.get(1)?,
-                    engine_name: row.get(2)?,
-                    dev_revision_id: row.get(3)?,
-                    dev_commit_hash: row.get(4)?,
-                    base_revision_id: row.get(5)?,
-                    base_commit_hash: row.get(6)?,
-                    branch_context: row.get(7)?,
-                    status: decode_test_status(&status_str)?,
-                    priority: row.get(9)?,
-                    job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 11)?,
-                    started_at: parse_optional_timestamp_column(started_at, 12)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
-                    wins: row.get(14)?,
-                    losses: row.get(15)?,
-                    draws: row.get(16)?,
-                    elo_diff: row.get(17)?,
-                    elo_error: row.get(18)?,
-                    los: row.get(19)?,
-                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        let sql = format!("{JOB_SUMMARY_SELECT} ORDER BY j.created_at DESC");
+        self.list_job_summaries(&sql, [])
     }
 
     pub fn list_jobs_for_revision(
@@ -1029,73 +927,21 @@ impl Storage {
         revision_id: &str,
         limit: usize,
     ) -> Result<Vec<JobSummary>> {
+        let sql = format!(
+            "{JOB_SUMMARY_SELECT} WHERE j.dev_revision_id = ?1 OR j.base_revision_id = ?1 ORDER BY j.created_at DESC LIMIT ?2"
+        );
+        self.list_job_summaries(&sql, params![revision_id, limit as i64])
+    }
+
+    fn list_job_summaries<P>(&self, sql: &str, params: P) -> Result<Vec<JobSummary>>
+    where
+        P: Params,
+    {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT
-                j.id,
-                j.engine_id,
-                e.name,
-                j.dev_revision_id,
-                dev.commit_hash,
-                j.base_revision_id,
-                base.commit_hash,
-                j.branch_context,
-                j.status,
-                j.priority,
-                j.job_type,
-                j.created_at,
-                j.started_at,
-                j.completed_at,
-                j.wins,
-                j.losses,
-                j.draws,
-                j.elo_diff,
-                j.elo_error,
-                j.los,
-                j.sprt_result
-             FROM test_jobs j
-             JOIN engines e ON e.id = j.engine_id
-             JOIN revisions dev ON dev.id = j.dev_revision_id
-             JOIN revisions base ON base.id = j.base_revision_id
-             WHERE j.dev_revision_id = ?1 OR j.base_revision_id = ?1
-             ORDER BY j.created_at DESC
-             LIMIT ?2",
-        )?;
-
+        let mut stmt = conn.prepare(sql)?;
         let jobs = stmt
-            .query_map(params![revision_id, limit as i64], |row| {
-                let status_str: String = row.get(8)?;
-                let job_type_str: String = row.get(10)?;
-                let created_at: String = row.get(11)?;
-                let started_at: Option<String> = row.get(12)?;
-                let completed_at: Option<String> = row.get(13)?;
-                let sprt_result: Option<String> = row.get(20)?;
-                Ok(JobSummary {
-                    id: row.get(0)?,
-                    engine_id: row.get(1)?,
-                    engine_name: row.get(2)?,
-                    dev_revision_id: row.get(3)?,
-                    dev_commit_hash: row.get(4)?,
-                    base_revision_id: row.get(5)?,
-                    base_commit_hash: row.get(6)?,
-                    branch_context: row.get(7)?,
-                    status: decode_test_status(&status_str)?,
-                    priority: row.get(9)?,
-                    job_type: decode_job_type(&job_type_str)?,
-                    created_at: parse_timestamp_column(&created_at, 11)?,
-                    started_at: parse_optional_timestamp_column(started_at, 12)?,
-                    completed_at: parse_optional_timestamp_column(completed_at, 13)?,
-                    wins: row.get(14)?,
-                    losses: row.get(15)?,
-                    draws: row.get(16)?,
-                    elo_diff: row.get(17)?,
-                    elo_error: row.get(18)?,
-                    los: row.get(19)?,
-                    sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
-                })
-            })?
+            .query_map(params, map_job_summary_row)?
             .collect::<Result<Vec<_>, _>>()?;
-
         Ok(jobs)
     }
 
@@ -1516,6 +1362,38 @@ fn map_test_job_row(row: &Row<'_>) -> rusqlite::Result<TestJob> {
         started_at: parse_optional_timestamp_column(started_at, 11)?,
         completed_at: parse_optional_timestamp_column(completed_at, 12)?,
         result: None,
+    })
+}
+
+fn map_job_summary_row(row: &Row<'_>) -> rusqlite::Result<JobSummary> {
+    let status_str: String = row.get(8)?;
+    let job_type_str: String = row.get(10)?;
+    let created_at: String = row.get(11)?;
+    let started_at: Option<String> = row.get(12)?;
+    let completed_at: Option<String> = row.get(13)?;
+    let sprt_result: Option<String> = row.get(20)?;
+    Ok(JobSummary {
+        id: row.get(0)?,
+        engine_id: row.get(1)?,
+        engine_name: row.get(2)?,
+        dev_revision_id: row.get(3)?,
+        dev_commit_hash: row.get(4)?,
+        base_revision_id: row.get(5)?,
+        base_commit_hash: row.get(6)?,
+        branch_context: row.get(7)?,
+        status: decode_test_status(&status_str)?,
+        priority: row.get(9)?,
+        job_type: decode_job_type(&job_type_str)?,
+        created_at: parse_timestamp_column(&created_at, 11)?,
+        started_at: parse_optional_timestamp_column(started_at, 12)?,
+        completed_at: parse_optional_timestamp_column(completed_at, 13)?,
+        wins: row.get(14)?,
+        losses: row.get(15)?,
+        draws: row.get(16)?,
+        elo_diff: row.get(17)?,
+        elo_error: row.get(18)?,
+        los: row.get(19)?,
+        sprt_result: sprt_result.as_deref().map(decode_sprt_result).transpose()?,
     })
 }
 

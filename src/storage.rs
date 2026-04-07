@@ -724,6 +724,31 @@ impl Storage {
         Ok(count > 0)
     }
 
+    pub fn has_test_job_for_branch_head(
+        &self,
+        engine_id: &str,
+        dev_revision_id: &str,
+        branch_context: &str,
+        job_type: JobType,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM test_jobs
+             WHERE engine_id = ?1
+               AND dev_revision_id = ?2
+               AND branch_context = ?3
+               AND job_type = ?4",
+            params![
+                engine_id,
+                dev_revision_id,
+                branch_context,
+                encode_job_type(job_type),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn claim_next_job(&self) -> Result<Option<TestJob>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

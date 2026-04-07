@@ -219,23 +219,41 @@ impl TrainingRunWriter {
             descriptor.source_job_id.as_deref(),
             descriptor.source_role.as_deref(),
         )?;
-        let metadata = RunMetadata {
-            engine_id: descriptor.engine_id,
-            engine_name: descriptor.engine_name,
-            revision_id: descriptor.revision_id,
-            revision_hash: descriptor.revision_hash,
-            games_requested: descriptor.games_requested,
-            games_played: 0,
-            samples_written: 0,
-            time_control: descriptor.time_control,
-            output_depth_counts: BTreeMap::new(),
-            created_at: Utc::now().to_rfc3339(),
-            kind: descriptor.kind,
-            status: TrainingRunStatus::Running,
-            source_job_id: descriptor.source_job_id,
-            source_role: descriptor.source_role,
-            depth_mode: descriptor.depth_mode,
-            depth_value: descriptor.depth_value,
+        let metadata_path = run_dir.join("metadata.json");
+        let metadata = if descriptor.kind == TrainingRunKind::Idle && metadata_path.exists() {
+            let mut metadata: RunMetadata = serde_json::from_slice(&fs::read(&metadata_path)?)?;
+            metadata.engine_id = descriptor.engine_id;
+            metadata.engine_name = descriptor.engine_name;
+            metadata.revision_id = descriptor.revision_id;
+            metadata.revision_hash = descriptor.revision_hash;
+            metadata.games_requested = descriptor.games_requested;
+            metadata.time_control = descriptor.time_control;
+            metadata.kind = descriptor.kind;
+            metadata.status = TrainingRunStatus::Running;
+            metadata.source_job_id = descriptor.source_job_id;
+            metadata.source_role = descriptor.source_role;
+            metadata.depth_mode = descriptor.depth_mode;
+            metadata.depth_value = descriptor.depth_value;
+            metadata
+        } else {
+            RunMetadata {
+                engine_id: descriptor.engine_id,
+                engine_name: descriptor.engine_name,
+                revision_id: descriptor.revision_id,
+                revision_hash: descriptor.revision_hash,
+                games_requested: descriptor.games_requested,
+                games_played: 0,
+                samples_written: 0,
+                time_control: descriptor.time_control,
+                output_depth_counts: BTreeMap::new(),
+                created_at: Utc::now().to_rfc3339(),
+                kind: descriptor.kind,
+                status: TrainingRunStatus::Running,
+                source_job_id: descriptor.source_job_id,
+                source_role: descriptor.source_role,
+                depth_mode: descriptor.depth_mode,
+                depth_value: descriptor.depth_value,
+            }
         };
         let writer = Self {
             run_dir,
@@ -435,7 +453,7 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
             revision_id: config.revision_id.clone(),
             revision_hash: config.revision_hash.clone(),
             time_control: config.time_control.to_string(),
-            games_requested: Some(config.games),
+            games_requested: (config.kind != TrainingRunKind::Idle).then_some(config.games),
             kind: config.kind,
             source_job_id: None,
             source_role: None,
@@ -445,21 +463,24 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
     )?;
 
     let outcome = (|| -> Result<SelfPlayDataSummary> {
-        for (game_index, opening) in openings.iter().cycle().enumerate() {
-            if writer.games_played() >= config.games {
+        let mut batch_games_played = 0;
+        for opening in openings.iter().cycle() {
+            if batch_games_played >= config.games {
                 break;
             }
 
+            let game_number = writer.games_played() + 1;
             let samples = play_selfplay_game(
                 &config.binary_path,
                 opening,
                 &config.time_control,
                 config.hash_mb,
                 config.threads,
-                (game_index as u32) + 1,
+                game_number,
             )?;
-            writer.record_game((game_index as u32) + 1)?;
+            writer.record_game(game_number)?;
             writer.append_samples(&samples)?;
+            batch_games_played += 1;
         }
 
         writer.set_status(TrainingRunStatus::Completed)?;
@@ -486,26 +507,31 @@ fn prepare_run_dir(
     source_job_id: Option<&str>,
     source_role: Option<&str>,
 ) -> Result<PathBuf> {
-    let prefix = match kind {
-        TrainingRunKind::SelfPlay => "selfplay".to_string(),
-        TrainingRunKind::Regression => {
-            let job = source_job_id
-                .map(|value| value.chars().take(8).collect::<String>())
-                .unwrap_or_else(|| "job".to_string());
-            let role = source_role.unwrap_or("unknown");
-            format!("regression-{}-{}", job, role)
-        }
-        TrainingRunKind::Idle => "idle".to_string(),
+    let run_dir = if kind == TrainingRunKind::Idle {
+        base.join(sanitize_path_component(engine_name))
+            .join(revision_hash)
+            .join("idle-current")
+    } else {
+        let prefix = match kind {
+            TrainingRunKind::SelfPlay => "selfplay".to_string(),
+            TrainingRunKind::Regression => {
+                let job = source_job_id
+                    .map(|value| value.chars().take(8).collect::<String>())
+                    .unwrap_or_else(|| "job".to_string());
+                let role = source_role.unwrap_or("unknown");
+                format!("regression-{}-{}", job, role)
+            }
+            TrainingRunKind::Idle => unreachable!("idle handled above"),
+        };
+        base.join(sanitize_path_component(engine_name))
+            .join(revision_hash)
+            .join(format!(
+                "{}-{}-{}",
+                prefix,
+                Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
+                Uuid::new_v4()
+            ))
     };
-    let run_dir = base
-        .join(sanitize_path_component(engine_name))
-        .join(revision_hash)
-        .join(format!(
-            "{}-{}-{}",
-            prefix,
-            Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
-            Uuid::new_v4()
-        ));
     fs::create_dir_all(&run_dir)?;
     Ok(run_dir)
 }
@@ -728,6 +754,37 @@ mod tests {
         )?;
 
         assert_ne!(first, second);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn idle_runs_resume_in_a_stable_directory() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("crucible-training-idle-{}", Uuid::new_v4()));
+        let descriptor = TrainingRunDescriptor {
+            engine_id: "engine-1".into(),
+            engine_name: "Sykora".into(),
+            revision_id: "rev-1".into(),
+            revision_hash: "abcd".into(),
+            time_control: "10+0.1".into(),
+            games_requested: None,
+            kind: TrainingRunKind::Idle,
+            source_job_id: None,
+            source_role: None,
+            depth_mode: TrainingDepthMode::Exact,
+            depth_value: 10,
+        };
+
+        let mut first = TrainingRunWriter::begin(&base, descriptor.clone())?;
+        first.record_game(1)?;
+        first.set_status(TrainingRunStatus::Completed)?;
+        let first_dir = first.run_dir().to_path_buf();
+
+        let second = TrainingRunWriter::begin(&base, descriptor)?;
+        assert_eq!(second.run_dir(), first_dir.as_path());
+        assert_eq!(second.games_played(), 1);
+        assert_eq!(second.metadata.status, TrainingRunStatus::Running);
+
         fs::remove_dir_all(base)?;
         Ok(())
     }

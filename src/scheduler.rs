@@ -75,6 +75,14 @@ impl Scheduler {
                 if dev.id == base.id {
                     continue;
                 }
+                if self.storage.has_test_job_for_branch_head(
+                    engine_id,
+                    &dev.id,
+                    branch_name,
+                    JobType::Sequential,
+                )? {
+                    continue;
+                }
                 if should_schedule_pair(&self.storage, engine_id, dev, base, JobType::Sequential)? {
                     new_jobs.push(self.make_job(
                         dev,
@@ -417,6 +425,61 @@ mod tests {
         }));
         assert!(!jobs.iter().any(|job| {
             job.dev_revision_id == exp_head.id && job.base_revision_id == shared.id
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_head_is_not_rescheduled_when_main_moves() -> Result<()> {
+        let storage = Storage::in_memory()?;
+        let engine = Engine {
+            branches: vec!["main".into()],
+            experimental_branches: vec!["exp/*".into()],
+            ..test_engine()
+        };
+        storage.insert_engine(&engine)?;
+
+        let shared = test_revision(&engine.id, "main", "base", 0);
+        let mut shared_exp = shared.clone();
+        shared_exp.branch = "exp/nullmove".into();
+
+        let mut old_main_head = test_revision(&engine.id, "main", "main2", 1);
+        let mut exp_head = test_revision(&engine.id, "exp/nullmove", "exp2", 2);
+        let mut new_main_head = test_revision(&engine.id, "main", "main3", 3);
+        old_main_head.binary_fingerprint = Some("main-old".into());
+        exp_head.binary_fingerprint = Some("exp-head".into());
+        new_main_head.binary_fingerprint = Some("main-new".into());
+
+        storage.insert_revision(&shared)?;
+        storage.insert_revision(&shared_exp)?;
+        storage.insert_revision(&old_main_head)?;
+        storage.insert_revision(&exp_head)?;
+        storage.insert_revision(&new_main_head)?;
+
+        storage.insert_test_job(&TestJob {
+            id: "existing-exp-job".into(),
+            engine_id: engine.id.clone(),
+            dev_revision_id: exp_head.id.clone(),
+            base_revision_id: old_main_head.id.clone(),
+            branch_context: Some("exp/nullmove".into()),
+            time_control: TimeControl::stc(),
+            opening_book: None,
+            status: TestStatus::Completed,
+            priority: priority::BRANCH_HEAD,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            job_type: JobType::Sequential,
+        })?;
+
+        let scheduler = Scheduler::new(storage, Config::default());
+        let jobs = scheduler.schedule_engine(&engine.id)?;
+
+        assert!(!jobs.iter().any(|job| {
+            job.dev_revision_id == exp_head.id
+                && job.base_revision_id == new_main_head.id
+                && job.branch_context.as_deref() == Some("exp/nullmove")
         }));
         Ok(())
     }

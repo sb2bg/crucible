@@ -1024,13 +1024,13 @@
           <thead>
             <tr>
               <th>Created</th>
+              <th>State</th>
               <th>Engine</th>
               <th>Profile</th>
               <th>Candidate</th>
               <th>Baseline</th>
-              <th>Delta</th>
-              <th>Verdict</th>
-              <th>H2H</th>
+              <th>Summary</th>
+              <th>Details</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -1853,17 +1853,37 @@
       const payload = await api('/api/admin/gates');
       state.gateProfiles = payload.profiles || [];
       populateGateProfiles();
+      const running = payload.running || [];
       const runs = payload.runs || [];
       const body = document.getElementById('gates-body');
       const empty = document.getElementById('gates-empty');
-      if (!runs.length) {
+      if (!running.length && !runs.length) {
         body.innerHTML = '';
         empty.classList.remove('hidden');
         return;
       }
 
       empty.classList.add('hidden');
-      body.innerHTML = runs.map(run => {
+      const runningRows = running.map(run => `
+        <tr>
+          <td title="${escapeHtml(run.created_at)}">${timeAgo(run.created_at)}</td>
+          <td><span class="badge badge-${String(run.status || 'running').toLowerCase()}">${escapeHtml(run.status || 'running')}</span></td>
+          <td>${escapeHtml(run.engine_name || '')}</td>
+          <td>${escapeHtml(run.profile_name || '')}</td>
+          <td class="mono">${escapeHtml((run.candidate_hash || '').slice(0, 8))}</td>
+          <td class="mono">${escapeHtml((run.baseline_hash || '').slice(0, 8))}</td>
+          <td class="mono">${Number(run.completed_matches || 0)} / ${Number(run.total_matches || 0)}</td>
+          <td>${escapeHtml(run.message || '')}</td>
+          <td>
+            <div class="inline-actions">
+              ${String(run.status || 'running') === 'running'
+                ? `<button class="button-danger button-inline" type="button" data-cancel-gate="${escapeHtmlAttr(run.id || '')}">Cancel</button>`
+                : '—'}
+            </div>
+          </td>
+        </tr>
+      `);
+      const completedRows = runs.map(run => {
         const summary = run.summary || run;
         const delta = Number(summary.score_delta_pct || 0);
         const h2h = summary.head_to_head?.result || {};
@@ -1871,12 +1891,12 @@
         return `
           <tr>
             <td title="${escapeHtml(summary.generated_at)}">${timeAgo(summary.generated_at)}</td>
+            <td><span class="badge badge-${String(summary.verdict || 'tie').toLowerCase()}">${escapeHtml(summary.verdict || 'Tie')}</span></td>
             <td>${escapeHtml(summary.engine_name || '')}</td>
             <td>${escapeHtml(summary.profile_name || '')}</td>
             <td class="mono">${escapeHtml((summary.candidate?.commit_hash || '').slice(0, 8))}</td>
             <td class="mono">${escapeHtml((summary.baseline?.commit_hash || '').slice(0, 8))}</td>
             <td><span class="${delta >= 0 ? 'positive' : 'negative'} mono">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%</span></td>
-            <td><span class="badge badge-${String(summary.verdict || 'tie').toLowerCase()}">${escapeHtml(summary.verdict || 'Tie')}</span></td>
             <td class="mono">${Number(h2h.wins || 0)} / ${Number(h2h.draws || 0)} / ${Number(h2h.losses || 0)} • ${h2hScore}%</td>
             <td>
               <div class="inline-actions">
@@ -1885,10 +1905,14 @@
             </td>
           </tr>
         `;
-      }).join('');
+      });
+      body.innerHTML = [...runningRows, ...completedRows].join('');
 
       body.querySelectorAll('[data-download-gate]').forEach(button => {
         button.addEventListener('click', () => downloadGateRun(button.dataset.downloadGate, button));
+      });
+      body.querySelectorAll('[data-cancel-gate]').forEach(button => {
+        button.addEventListener('click', () => cancelGate(button.dataset.cancelGate, button));
       });
     } catch (error) {
       state.gateProfiles = [];
@@ -2415,6 +2439,19 @@
       link.remove();
       URL.revokeObjectURL(url);
       showToast('gate result downloaded');
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function cancelGate(gateId, button) {
+    setBusy(button, true);
+    try {
+      await api(`/api/admin/gates/${encodeURIComponent(gateId)}/cancel`, { method: 'POST' });
+      showToast('gate cancellation requested', 'info');
+      await loadGateRuns();
     } catch (error) {
       showToast(error.message, 'error');
     } finally {

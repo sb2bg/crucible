@@ -10,17 +10,21 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::bisect::{BisectRunner, BisectStep};
 use crate::config::Config;
 use crate::export::build_export_bundle;
 use crate::gate::{
     default_gate_output_path, gate_profile_summaries, list_gate_runs, resolve_gate_profile,
-    run_release_gate, write_gate_summary,
+    run_release_gate_with_progress, write_gate_summary,
 };
 use crate::git::{branch_pattern_matches, short_hash, CommitDetails, DiffSummary, GitManager};
 use crate::scheduler::Scheduler;
@@ -32,10 +36,44 @@ use crate::workflow::{queue_bisect_probe, sync_engine_revisions};
 pub struct WebState {
     pub storage: Storage,
     pub config: Arc<RwLock<Config>>,
+    gate_tasks: Mutex<BTreeMap<String, GateTaskHandle>>,
+}
+
+struct GateTaskHandle {
+    cancel_flag: Arc<AtomicBool>,
+    snapshot: Arc<Mutex<GateTaskSnapshot>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GateTaskStatus {
+    Running,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GateTaskSnapshot {
+    id: String,
+    engine_name: String,
+    profile_name: String,
+    candidate_hash: String,
+    baseline_hash: String,
+    created_at: String,
+    updated_at: String,
+    completed_matches: u32,
+    total_matches: u32,
+    status: GateTaskStatus,
+    message: String,
+    error: Option<String>,
 }
 
 pub fn create_router(storage: Storage, config: Arc<RwLock<Config>>) -> Router {
-    let state = Arc::new(WebState { storage, config });
+    let state = Arc::new(WebState {
+        storage,
+        config,
+        gate_tasks: Mutex::new(BTreeMap::new()),
+    });
 
     Router::new()
         .route("/", get(index_handler))
@@ -60,6 +98,10 @@ pub fn create_router(storage: Storage, config: Arc<RwLock<Config>>) -> Router {
         .route(
             "/api/admin/gates/:file_name",
             get(download_gate_run_handler),
+        )
+        .route(
+            "/api/admin/gates/:gate_id/cancel",
+            post(cancel_gate_handler),
         )
         .route(
             "/api/admin/engines/:engine_id",
@@ -193,6 +235,22 @@ fn current_config(state: &WebState) -> Config {
     state.config.read().expect("shared config poisoned").clone()
 }
 
+fn running_gate_snapshots(state: &WebState) -> Vec<GateTaskSnapshot> {
+    state
+        .gate_tasks
+        .lock()
+        .expect("gate tasks poisoned")
+        .values()
+        .map(|handle| {
+            handle
+                .snapshot
+                .lock()
+                .expect("gate snapshot poisoned")
+                .clone()
+        })
+        .collect()
+}
+
 async fn index_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
@@ -289,9 +347,11 @@ async fn list_gate_runs_handler(
         return response;
     }
     let config = current_config(&state);
+    let running = running_gate_snapshots(&state);
     match list_gate_runs(&config.data_dir) {
         Ok(runs) => Json(json!({
             "profiles": gate_profile_summaries(&config),
+            "running": running,
             "runs": runs
         }))
         .into_response(),
@@ -441,6 +501,7 @@ async fn start_gate_handler(
         Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
     };
 
+    let gate_id = Uuid::new_v4().to_string();
     let profile_name = profile.name.clone();
     let output_path = default_gate_output_path(&config.data_dir, &profile_name);
     let file_name = output_path
@@ -448,25 +509,79 @@ async fn start_gate_handler(
         .and_then(|value| value.to_str())
         .unwrap_or("gate.json")
         .to_string();
+    let now = Utc::now().to_rfc3339();
+    let snapshot = Arc::new(Mutex::new(GateTaskSnapshot {
+        id: gate_id.clone(),
+        engine_name: engine.name.clone(),
+        profile_name: profile_name.clone(),
+        candidate_hash: candidate.commit_hash.clone(),
+        baseline_hash: baseline.commit_hash.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        completed_matches: 0,
+        total_matches: (profile.opponents.len() as u32) * 2 + 1,
+        status: GateTaskStatus::Running,
+        message: "queued".into(),
+        error: None,
+    }));
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    state
+        .gate_tasks
+        .lock()
+        .expect("gate tasks poisoned")
+        .insert(
+            gate_id.clone(),
+            GateTaskHandle {
+                cancel_flag: cancel_flag.clone(),
+                snapshot: snapshot.clone(),
+            },
+        );
     let engine_for_task = engine.clone();
     let candidate_for_task = candidate.clone();
     let baseline_for_task = baseline.clone();
+    let state_for_task = state.clone();
+    let gate_id_for_task = gate_id.clone();
     tokio::spawn(async move {
-        match run_release_gate(
+        let result = run_release_gate_with_progress(
             &config,
             &engine_for_task,
             &candidate_for_task,
             &baseline_for_task,
             &profile,
+            Some(cancel_flag.clone()),
+            |progress| {
+                let mut snapshot = snapshot.lock().expect("gate snapshot poisoned");
+                snapshot.completed_matches = progress.completed_matches;
+                snapshot.total_matches = progress.total_matches;
+                snapshot.message = progress.message;
+                snapshot.updated_at = Utc::now().to_rfc3339();
+            },
         )
-        .await
-        {
+        .await;
+
+        match result {
             Ok(summary) => {
                 if let Err(err) = write_gate_summary(&output_path, &summary) {
                     tracing::error!("Failed to write gate summary to {:?}: {}", output_path, err);
                 }
+                state_for_task
+                    .gate_tasks
+                    .lock()
+                    .expect("gate tasks poisoned")
+                    .remove(&gate_id_for_task);
             }
             Err(err) => {
+                let mut gate_snapshot = snapshot.lock().expect("gate snapshot poisoned");
+                gate_snapshot.updated_at = Utc::now().to_rfc3339();
+                if cancel_flag.load(Ordering::Relaxed) {
+                    gate_snapshot.status = GateTaskStatus::Cancelled;
+                    gate_snapshot.message = "cancelled".into();
+                    gate_snapshot.error = None;
+                } else {
+                    gate_snapshot.status = GateTaskStatus::Failed;
+                    gate_snapshot.message = "failed".into();
+                    gate_snapshot.error = Some(err.to_string());
+                }
                 tracing::error!(
                     "Gate run failed for '{}' candidate {} baseline {} profile {}: {}",
                     engine_for_task.name,
@@ -481,6 +596,7 @@ async fn start_gate_handler(
 
     Json(json!({
         "started": true,
+        "gate_id": gate_id,
         "file_name": file_name,
         "engine_name": engine.name,
         "candidate": candidate.commit_hash,
@@ -488,6 +604,26 @@ async fn start_gate_handler(
         "profile": profile_name
     }))
     .into_response()
+}
+
+async fn cancel_gate_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(gate_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
+
+    let gate_tasks = state.gate_tasks.lock().expect("gate tasks poisoned");
+    let Some(handle) = gate_tasks.get(&gate_id) else {
+        return json_error(StatusCode::NOT_FOUND, anyhow::anyhow!("gate not found"));
+    };
+    handle.cancel_flag.store(true, Ordering::Relaxed);
+    let mut snapshot = handle.snapshot.lock().expect("gate snapshot poisoned");
+    snapshot.updated_at = Utc::now().to_rfc3339();
+    snapshot.message = "cancellation requested".into();
+    Json(json!({ "cancelled": true })).into_response()
 }
 
 async fn export_bundle_handler(

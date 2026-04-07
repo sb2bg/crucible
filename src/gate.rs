@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::{Config, GateProfileConfig};
@@ -72,6 +74,13 @@ pub struct GateProfileSummary {
     pub opponents: Vec<String>,
     pub games_per_opponent: u32,
     pub min_score_delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRunProgress {
+    pub completed_matches: u32,
+    pub total_matches: u32,
+    pub message: String,
 }
 
 impl GateSideSummary {
@@ -238,6 +247,30 @@ pub async fn run_release_gate(
     baseline_revision: &EngineRevision,
     profile: &GateProfileConfig,
 ) -> Result<GateRunSummary> {
+    run_release_gate_with_progress(
+        config,
+        engine,
+        candidate_revision,
+        baseline_revision,
+        profile,
+        None,
+        |_| {},
+    )
+    .await
+}
+
+pub async fn run_release_gate_with_progress<F>(
+    config: &Config,
+    engine: &Engine,
+    candidate_revision: &EngineRevision,
+    baseline_revision: &EngineRevision,
+    profile: &GateProfileConfig,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    mut on_progress: F,
+) -> Result<GateRunSummary>
+where
+    F: FnMut(GateRunProgress) + Send,
+{
     let candidate_binary = candidate_revision.binary_path.clone().with_context(|| {
         format!(
             "Candidate revision '{}' is missing a built binary",
@@ -281,6 +314,8 @@ pub async fn run_release_gate(
         &time_control,
         fixed_length_bounds,
         profile.games_per_opponent,
+        cancel_flag,
+        &mut on_progress,
     )
     .await?;
 
@@ -318,6 +353,8 @@ async fn run_gate_tasks(
     time_control: &TimeControl,
     sprt_bounds: SprtBounds,
     games_per_opponent: u32,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    on_progress: &mut impl FnMut(GateRunProgress),
 ) -> Result<(Vec<GateMatchSummary>, Vec<GateMatchSummary>, TestResult)> {
     let worker_count = usize::try_from(config.testing.concurrency.max(1)).unwrap_or(1);
     let mut tasks = Vec::new();
@@ -345,7 +382,7 @@ async fn run_gate_tasks(
                 max_games: games_per_opponent,
                 hash_mb: config.testing.hash_mb,
                 threads: config.testing.engine_threads,
-                cancel_flag: None,
+                cancel_flag: cancel_flag.clone(),
             },
         ));
         tasks.push((
@@ -365,7 +402,7 @@ async fn run_gate_tasks(
                 max_games: games_per_opponent,
                 hash_mb: config.testing.hash_mb,
                 threads: config.testing.engine_threads,
-                cancel_flag: None,
+                cancel_flag: cancel_flag.clone(),
             },
         ));
     }
@@ -383,7 +420,7 @@ async fn run_gate_tasks(
             max_games: games_per_opponent,
             hash_mb: config.testing.hash_mb,
             threads: config.testing.engine_threads,
-            cancel_flag: None,
+            cancel_flag: cancel_flag.clone(),
         },
     ));
 
@@ -392,8 +429,21 @@ async fn run_gate_tasks(
     let mut head_to_head = None;
     let mut pending = tasks.into_iter();
     let mut workers = tokio::task::JoinSet::new();
+    let total_matches = (opponent_names.len() as u32) * 2 + 1;
+    let mut completed_matches = 0u32;
+    on_progress(GateRunProgress {
+        completed_matches,
+        total_matches,
+        message: format!("0 / {} matches complete", total_matches),
+    });
 
     loop {
+        if cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            anyhow::bail!("gate cancelled");
+        }
         while workers.len() < worker_count {
             let Some((kind, match_config)) = pending.next() else {
                 break;
@@ -410,6 +460,7 @@ async fn run_gate_tasks(
         };
         let (kind, result) = joined.map_err(|err| anyhow!("gate task panicked: {}", err))?;
         let result = result?;
+        completed_matches += 1;
 
         match kind {
             GateTaskKind::CandidateVsOpponent(index) => {
@@ -428,6 +479,12 @@ async fn run_gate_tasks(
                 head_to_head = Some(result);
             }
         }
+
+        on_progress(GateRunProgress {
+            completed_matches,
+            total_matches,
+            message: format!("{} / {} matches complete", completed_matches, total_matches),
+        });
     }
 
     let candidate_matches = candidate_results

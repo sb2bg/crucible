@@ -1,6 +1,6 @@
 [server]
 web_port = 8877
-web_host = "127.0.0.1"   # use "0.0.0.0" in Docker
+web_host = "0.0.0.0"     # bind externally for Docker port publishing
 admin_token = "wekjfhwkjehqqedwefdweswecjuegrtfs"
 
 [testing]

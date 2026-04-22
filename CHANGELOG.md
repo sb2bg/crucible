@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-22
+
+### Added
+
+- Docker guide with Compose setup, admin-token guidance, mounted toolchains, custom images, and nested-Docker caveats.
+- Engine runtime guide with examples for Rust, C/C++, Zig, .NET/C#, Java, Python, JavaScript, and Haskell engines.
+- Motivation page explaining Crucible's single-machine workflow and how it differs from distributed engine-testing platforms.
+- Docker image runtime toolchains for Rust `1.94.1`, C/C++, Zig `0.15.2`, .NET SDK 8, Java/Maven, JavaScript/npm, and Python/pip/venv.
+
+### Changed
+
+- Present Docker and Cargo/local installs as equal first-class setup paths, with guidance on when each is simpler.
+- Use the published GHCR image in the bundled Compose file instead of building locally by default.
+- Reorganize docs navigation so Docker and engine runtime setup have dedicated pages.
+- Document that Zig is pinned to `0.15.2` because Zig releases often make breaking language and build-system changes.
+
+### Security
+
+- Reject `paste-generated-token-here` as an admin-token placeholder, matching the new Docker setup docs.
+
 ## [0.1.0] - 2026-04-22
 
 ### Added
@@ -33,5 +53,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Validate engine names and binary paths before storing or using them, and refuse build artifact copies or engine-data deletes outside managed repository directories.
 - Redact engine build commands and binary paths from the public engine API.
 
-[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/sb2bg/crucible/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0

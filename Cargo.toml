@@ -1,6 +1,6 @@
 [package]
 name = "crucible-chess"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "CI for chess engines: automated SPRT regression testing across your git history"

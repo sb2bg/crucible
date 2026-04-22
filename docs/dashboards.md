@@ -9,6 +9,8 @@ Crucible ships with a web dashboard and an optional terminal UI. Both read from 
 
 ## The web dashboard
 
+[![Overview tab](https://github.com/sb2bg/crucible/blob/main/assets/overview.png?raw=true)](https://github.com/sb2bg/crucible/blob/main/assets/overview.png?raw=true)
+
 By default the dashboard listens on <http://localhost:8877>. It is a single page served by an embedded Axum server, with tabs across the top:
 
 - **Overview**: engines, latest revisions, the most recent jobs, and daemon status at a glance.
@@ -21,6 +23,10 @@ By default the dashboard listens on <http://localhost:8877>. It is a single page
 - **Admin**: add and remove engines, queue manual tests, start regression hunts, cancel jobs, and download the JSON export bundle.
 
 If `server.admin_token` is set, the Admin tab prompts for the token and stores it in the browser's local storage.
+
+[![Jobs tab](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)
+
+The Jobs tab is the working view. Each row is one SPRT match between a dev and a base commit, with live W/D/L, an Elo estimate and error bar, and the current SPRT verdict. Running matches update in place as games complete.
 
 ## The terminal UI
 

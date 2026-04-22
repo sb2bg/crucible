@@ -1,0 +1,81 @@
+name: Bug report
+description: Report something that does not work the way it should.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much of this form as you can.
+
+        If the issue is security-sensitive, do not file it here. See [SECURITY.md](https://github.com/sb2bg/crucible/blob/main/SECURITY.md) for the private reporting process.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: A clear, concise description of the bug and what you expected instead.
+      placeholder: "When I run `crucible bisect`, the daemon logs X and then Y, but I expected Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: The minimum sequence of commands or actions that triggers the bug.
+      placeholder: |
+        1. `crucible init`
+        2. `crucible add --name demo ...`
+        3. `crucible run`
+        4. Observe the error after a few minutes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: Paste the parts of your `crucible.toml` that matter. Redact any secrets first.
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output from `crucible` with `RUST_LOG=info` or higher. Wrap long logs in a collapsible details block if you have one.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Crucible version
+      description: Output of `crucible --version`, or the commit hash if you built from source.
+      placeholder: "0.1.0 or commit a1b2c3d"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      placeholder: "Debian 12, macOS 14.4, Windows 11, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: rust
+    attributes:
+      label: Rust toolchain
+      description: Output of `rustc --version`. Only needed if you built from source.
+      placeholder: "rustc 1.94.1"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am running the latest release, or a recent `main` build.
+          required: true

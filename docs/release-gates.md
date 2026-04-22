@@ -25,7 +25,7 @@ name = "release"
 opponents = ["Stockfish", "Ethereal"]
 games_per_opponent = 200
 min_score_delta = 1.0
-opening_book = "openings/gate.fens"
+opening_book = "openings/gate.epd"
 
 [gate.profiles.time_control]
 base_ms = 30000

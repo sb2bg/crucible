@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::chess_rules::load_opening_book;
 use crate::config::{Config, GateProfileConfig};
 use crate::engine::match_runner::{run_match, MatchConfig};
 use crate::sprt::SprtBounds;
@@ -514,27 +515,6 @@ async fn run_gate_tasks(
     let head_to_head = head_to_head.context("missing gate head-to-head result")?;
 
     Ok((candidate_matches, baseline_matches, head_to_head))
-}
-
-fn load_opening_book(path: Option<&str>) -> Result<Option<Vec<String>>> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read opening book '{}'", path))?;
-    let openings = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-
-    if openings.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(openings))
-    }
 }
 
 #[cfg(test)]

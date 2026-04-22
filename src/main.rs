@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
+use crucible::chess_rules::load_opening_book;
 use crucible::config::Config;
 use crucible::engine::match_runner::{
     run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
@@ -1068,27 +1069,6 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         }
     };
     result
-}
-
-fn load_opening_book(path: Option<&str>) -> Result<Option<Vec<String>>> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read opening book '{}'", path))?;
-    let openings = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-
-    if openings.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(openings))
-    }
 }
 
 fn persist_job_result(storage: &Storage, job: &TestJob, result: &TestResult) -> Result<()> {

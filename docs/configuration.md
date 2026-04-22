@@ -93,9 +93,17 @@ The browser client stores the admin token in local storage. Clear the tab data, 
 | `hash_mb`               | `16`    | Hash table size passed to every engine instance (`setoption name Hash value ...`).         |
 | `engine_threads`        | `1`     | Threads per engine instance (`setoption name Threads value ...`).                          |
 | `poll_interval_seconds` | `60`    | How often the daemon fetches new commits and schedules fresh jobs.                         |
-| `opening_book`          | unset   | Path to a text file containing one opening per line (see below).                           |
+| `opening_book`          | unset   | Path to an EPD opening suite containing one position per line (see below).                 |
 
-The opening book is a plain text file. Each non-empty, non-comment line must be either the literal `startpos` or a full FEN. Lines beginning with `#` are ignored. PGN and EPD parsing are not implemented yet.
+The opening book is a plain text EPD file. Each non-empty, non-comment line must contain an EPD position: the first four FEN fields, followed by optional semicolon-terminated EPD operations. Lines beginning with `#` are ignored. Crucible honors `hmvc` and `fmvn` operations when present, defaulting them to `0` and `1` otherwise. Other EPD operations such as `bm` and `id` are accepted as metadata but are not used by the match runner.
+
+```text
+# openings/stc.epd
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -
+rnbqkbnr/ppp2ppp/4p3/3p4/3PP3/8/PPP2PPP/RNBQKBNR w KQkq d6 hmvc 0; fmvn 3; id "QGD";
+```
+
+Use an explicit starting-position EPD instead of the old `startpos` literal. Full six-field FEN lines are not valid opening-book entries.
 
 ### `[testing.time_control]`
 

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::chess_rules::{
     has_insufficient_material, opponent_win, parse_opening_board, per_move_timeout,
     perspective_result, record_position, resolve_no_move_result, MAX_MOVES_PER_GAME,
+    STARTING_POSITION_FEN,
 };
 use crate::engine::uci::{SearchScore, UciEngine};
 use crate::types::{GameResult, TimeControl};
@@ -444,7 +445,7 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
     let openings = config
         .opening_book
         .clone()
-        .unwrap_or_else(|| vec!["startpos".to_string()]);
+        .unwrap_or_else(|| vec![STARTING_POSITION_FEN.to_string()]);
     let mut writer = TrainingRunWriter::begin(
         &config.output_dir,
         TrainingRunDescriptor {
@@ -557,11 +558,7 @@ fn play_selfplay_game(
     let mut board = parse_opening_board(opening)?;
     let mut seen_positions = Vec::new();
     record_position(&mut seen_positions, &board);
-    let position = if opening == "startpos" {
-        "startpos".to_string()
-    } else {
-        format!("fen {}", opening)
-    };
+    let position = format!("fen {}", opening);
     let mut pending: Vec<PendingSample> = Vec::new();
     let mut move_count = 0;
     let mut wtime = tc.base_time_ms;

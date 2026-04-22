@@ -1,0 +1,36 @@
+title: Crucible
+description: Continuous integration for chess engines.
+url: "https://sb2bg.github.io"
+
+remote_theme: just-the-docs/just-the-docs
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: true
+
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "GitHub":
+    - "https://github.com/sb2bg/crucible"
+
+aux_links_new_tab: true
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+  - .bundle/
+
+permalink: pretty
+
+footer_content: >-
+  Crucible is licensed under GPL-3.0. Source at
+  <a href="https://github.com/sb2bg/crucible">github.com/sb2bg/crucible</a>.

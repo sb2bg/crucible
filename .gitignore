@@ -14,3 +14,11 @@
 *.swo
 
 .crucible
+
+# Jekyll (docs site)
+/_site/
+docs/_site/
+docs/.jekyll-cache/
+docs/.bundle/
+docs/vendor/
+docs/Gemfile.lock

@@ -392,7 +392,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crucible"
+name = "crucible-chess"
 version = "0.1.0"
 dependencies = [
  "anyhow",

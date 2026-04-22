@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the crate to `crucible-chess` for crates.io publishing. The binary and library names remain `crucible`, so `cargo install crucible-chess` still produces a `crucible` executable and `use crucible::...` imports continue to work unchanged.
+
 ## [0.1.0] - 2026-04-22
 
 ### Added

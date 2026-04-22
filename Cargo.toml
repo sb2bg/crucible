@@ -1,13 +1,24 @@
 [package]
-name = "crucible"
+name = "crucible-chess"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-description = "CI for chess engines — automated SPRT regression testing across your git history"
+description = "CI for chess engines: automated SPRT regression testing across your git history"
 license = "GPL-3.0"
 readme = "README.md"
+repository = "https://github.com/sb2bg/crucible"
+homepage = "https://sb2bg.github.io/crucible"
+documentation = "https://sb2bg.github.io/crucible"
 keywords = ["chess", "engine", "testing", "sprt", "uci"]
 categories = ["command-line-utilities", "games"]
+
+[lib]
+name = "crucible"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
 
 [dependencies]
 # Async runtime

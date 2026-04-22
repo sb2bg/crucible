@@ -15,6 +15,16 @@ The full documentation lives at **<https://sb2bg.github.io/crucible>**, or under
 
 ## Quick start
 
+Install from crates.io:
+
+```bash
+cargo install crucible-chess
+```
+
+This puts a `crucible` binary on your `PATH`. The crate is named `crucible-chess` because plain `crucible` is taken on crates.io; the binary, library, and command-line interface are unaffected.
+
+Or build from source:
+
 ```bash
 cargo build --release
 

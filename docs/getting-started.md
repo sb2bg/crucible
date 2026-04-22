@@ -5,7 +5,17 @@ nav_order: 2
 
 # Getting started
 
-Crucible is a single Rust binary. You can build it from source, run it under Docker, or leave it running as a long-lived service. This page walks through the first two paths.
+Crucible is a single Rust binary. You can install it from crates.io, build it from source, or run it under Docker. This page walks through all three.
+
+## Installing from crates.io
+
+The fastest path if you already have a Rust toolchain:
+
+```bash
+cargo install crucible-chess
+```
+
+This drops a `crucible` executable on your `PATH`. The crate is named `crucible-chess` on crates.io because plain `crucible` is taken; the binary, library, and CLI are unaffected by the rename.
 
 ## Building from source
 

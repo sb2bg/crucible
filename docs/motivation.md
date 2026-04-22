@@ -5,7 +5,7 @@ nav_order: 2
 
 # Why Crucible exists
 
-[![Crucible experiment screenshot](./assets/experiment.png)](https://sb2bg.github.io/crucible/#/timeline)
+[![Experiments tab](https://github.com/sb2bg/crucible/blob/main/assets/experiments.png?raw=true)](https://github.com/sb2bg/crucible/blob/main/assets/experiments.png?raw=true)
 
 You pushed a commit that changed the search function. Did your engine get stronger or weaker?
 

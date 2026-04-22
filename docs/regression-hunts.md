@@ -1,6 +1,6 @@
 ---
 title: Regression hunts
-nav_order: 6
+nav_order: 7
 ---
 
 # Regression hunts

@@ -44,6 +44,7 @@ For a Docker-based setup, see [Getting started](docs/getting-started.md).
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
+- [Recommended workflow](docs/workflow.md)
 - [Configuration reference](docs/configuration.md)
 - [CLI commands](docs/commands.md)
 - [Scheduling](docs/scheduling.md)

@@ -1,6 +1,11 @@
 # Crucible
 
-[![ci](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml)
+[![ci (main)](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/sb2bg/crucible/actions/workflows/docker-publish.yml?query=branch%3Amain)
+[![release](https://github.com/sb2bg/crucible/actions/workflows/release.yml/badge.svg)](https://github.com/sb2bg/crucible/actions/workflows/release.yml)
+[![latest release](https://img.shields.io/github/v/release/sb2bg/crucible?display_name=tag&sort=semver)](https://github.com/sb2bg/crucible/releases/latest)
+[![license](https://img.shields.io/github/license/sb2bg/crucible)](LICENSE)
+
+[![Experiments screenshot](https://github.com/sb2bg/crucible/raw/main/docs/assets/experiments.png)](https://sb2bg.github.io/crucible/)
 
 Crucible is continuous integration for chess engines. It watches your engine's git history, builds every commit, plays it against its predecessor under the Sequential Probability Ratio Test, and shows you an Elo timeline so you can see which changes made the engine stronger or weaker.
 
@@ -56,6 +61,10 @@ For a Docker-based setup, see [Getting started](docs/getting-started.md).
 - [Architecture](docs/architecture.md)
 - [CI and releases](docs/ci.md)
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, testing expectations, and project scope. Security issues should follow the private reporting process in [SECURITY.md](SECURITY.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-GPL-3.0
+GPL-3.0. See [LICENSE](LICENSE).

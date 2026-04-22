@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage archive contents (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stage="crucible-${version}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/crucible" "$stage/"
+          cp README.md LICENSE CHANGELOG.md "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+          shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          echo "ARCHIVE=${stage}.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUM=${stage}.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Stage archive contents (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $stage   = "crucible-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/crucible.exe" "$stage/"
+          Copy-Item README.md, LICENSE, CHANGELOG.md $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          $hash = Get-FileHash "$stage.zip" -Algorithm SHA256
+          "$($hash.Hash.ToLower())  $stage.zip" | Out-File "$stage.zip.sha256" -Encoding ascii
+          "ARCHIVE=$stage.zip"        | Out-File $env:GITHUB_ENV -Append
+          "CHECKSUM=$stage.zip.sha256" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crucible-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.CHECKSUM }}
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract changelog entry
+        id: changelog
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "notes<<EOF_NOTES"
+            awk -v v="$version" '
+              $0 ~ "^## \\[" v "\\]" { capture = 1; next }
+              capture && /^## / { exit }
+              capture { print }
+            ' CHANGELOG.md
+            echo "EOF_NOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: ${{ steps.changelog.outputs.notes }}

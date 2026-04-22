@@ -1,0 +1,109 @@
+name: publish-crate
+
+# Manual-only workflow for publishing to crates.io.
+#
+# This workflow is dormant: it never runs automatically. Publishing to
+# crates.io is irreversible (versions can be yanked but not deleted), so
+# it requires an explicit `workflow_dispatch` run with the target version
+# typed into the `version` input.
+#
+# Prerequisites before running:
+#   1. `Cargo.toml` version matches the version you are publishing.
+#   2. The corresponding `vX.Y.Z` tag exists, CI is green, and the GitHub
+#      Release has been published.
+#   3. A `CARGO_REGISTRY_TOKEN` secret has been added to the repository
+#      settings (Settings -> Secrets and variables -> Actions).
+#   4. The crate name in `Cargo.toml` matches what you own on crates.io.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (must match Cargo.toml, e.g. 0.1.0)"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to publish from (tag, branch, or SHA). Defaults to the tag matching `version`."
+        required: false
+        type: string
+      dry_run:
+        description: "Run `cargo publish --dry-run` instead of actually publishing."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve ref
+        id: resolve
+        shell: bash
+        run: |
+          ref="${{ inputs.ref }}"
+          if [ -z "$ref" ]; then
+            ref="v${{ inputs.version }}"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-crate
+
+      - name: Verify Cargo.toml version matches input
+        shell: bash
+        run: |
+          input="${{ inputs.version }}"
+          manifest="$(cargo pkgid | awk -F'[@#]' '{print $NF}')"
+          if [ "$manifest" != "$input" ]; then
+            echo "Cargo.toml version is '$manifest' but workflow input is '$input'."
+            echo "Aborting to avoid publishing the wrong version."
+            exit 1
+          fi
+          echo "Version match confirmed: $manifest"
+
+      - name: Verify working tree is clean
+        shell: bash
+        run: |
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "Working tree is dirty. Refusing to publish."
+            exit 1
+          fi
+
+      - name: Cargo publish (dry run)
+        if: ${{ inputs.dry_run }}
+        run: cargo publish --locked --dry-run
+
+      - name: Cargo publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN secret is not set. Aborting."
+            exit 1
+          fi
+          cargo publish --locked
+
+      - name: Summary
+        shell: bash
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Dry run complete. Re-run with dry_run = false to actually publish."
+          else
+            echo "Published ${{ inputs.version }} to crates.io."
+          fi

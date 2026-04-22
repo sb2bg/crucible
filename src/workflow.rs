@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::bisect::BisectRunner;
 use crate::config::Config;
@@ -25,7 +25,7 @@ pub fn sync_engine_revisions(
     for branch in &branches {
         let revisions =
             git_mgr.list_commits(repo, branch, &engine.id, engine.start_from.as_deref())?;
-        info!(
+        debug!(
             "Engine '{}' branch '{}': {} commits",
             engine.name,
             branch,

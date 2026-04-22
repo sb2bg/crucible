@@ -8,7 +8,7 @@ use git2::{BranchType, Delta, DiffFormat, Oid, Repository, Sort};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::types::*;
 
@@ -106,7 +106,7 @@ impl GitManager {
     /// Clone or open the repository
     pub fn ensure_repo(&self) -> Result<Repository> {
         if self.local_path.exists() {
-            info!("Opening existing repo at {:?}", self.local_path);
+            debug!("Opening existing repo at {:?}", self.local_path);
             let repo =
                 Repository::open(&self.local_path).context("Failed to open existing repository")?;
             // Fetch latest changes

@@ -25,5 +25,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Interrupted jobs are re-queued on daemon restart instead of being stuck in the `Running` state.
 
-[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0-rc.1...HEAD
-[0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0-rc.1
+[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0-rc.2...HEAD
+[0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0-rc.2

@@ -31,6 +31,12 @@ exclude:
 
 permalink: pretty
 
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
 footer_content: >-
   Crucible is licensed under GPL-3.0. Source at
   <a href="https://github.com/sb2bg/crucible">github.com/sb2bg/crucible</a>.

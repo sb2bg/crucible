@@ -8,7 +8,7 @@ nav_order: 1
 
 Crucible is continuous integration for chess engines. It watches your engine's git history, builds every commit, plays it against its predecessor under the Sequential Probability Ratio Test, and plots an Elo timeline so you can see which changes made the engine stronger or weaker.
 
-Most chess engine testing platforms, such as [OpenBench](https://github.com/AndyGrant/OpenBench), are built for large teams running tests across many volunteer machines. Crucible is built for the solo developer who just wants to know whether the last handful of commits helped. Everything runs on one machine, from a single binary, backed by SQLite.
+Most chess engine testing platforms, such as [OpenBench](https://github.com/AndyGrant/OpenBench), are built for large teams running tests across many volunteer machines. Crucible is built for the solo developer who just wants to know whether the last handful of commits helped. Everything runs on one machine, from a single binary, backed by SQLite. See [Why Crucible exists](motivation.md) for the longer version of this argument.
 
 ## What it does
 
@@ -22,10 +22,11 @@ Most chess engine testing platforms, such as [OpenBench](https://github.com/Andy
 
 ## Where to go next
 
-1. Start with [Getting started](getting-started.md) to install Crucible and set up your first engine.
-2. Read the [Recommended workflow](workflow.md) for how to host the daemon and use it day to day.
-3. Keep the [configuration reference](configuration.md) open while you edit `crucible.toml`.
-4. Look at [CLI commands](commands.md) when you want to queue a one-off test, start a regression hunt, or run a release gate.
-5. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
+1. If you want context first, read [Why Crucible exists](motivation.md).
+2. [Getting started](getting-started.md) to install Crucible and set up your first engine.
+3. Read the [Recommended workflow](workflow.md) for how to host the daemon and use it day to day.
+4. Keep the [configuration reference](configuration.md) open while you edit `crucible.toml`.
+5. Look at [CLI commands](commands.md) when you want to queue a one-off test, start a regression hunt, or run a release gate.
+6. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
 
 The source and issue tracker are at [github.com/sb2bg/crucible](https://github.com/sb2bg/crucible).

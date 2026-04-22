@@ -1,6 +1,6 @@
 ---
 title: Release gates
-nav_order: 8
+nav_order: 9
 ---
 
 # Release gates

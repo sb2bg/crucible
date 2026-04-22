@@ -9,7 +9,7 @@
 
 Crucible is continuous integration for chess engines. It watches your engine's git history, builds every commit, plays it against its predecessor under the Sequential Probability Ratio Test, and shows you an Elo timeline so you can see which changes made the engine stronger or weaker.
 
-Existing platforms such as [OpenBench](https://github.com/AndyGrant/OpenBench) are designed for large teams running distributed tests across many volunteer machines. Crucible is for the solo developer who just wants to know whether the last handful of commits helped. Everything runs on one machine, from a single binary, backed by SQLite.
+Existing platforms such as [OpenBench](https://github.com/AndyGrant/OpenBench) are designed for large teams running distributed tests across many volunteer machines. Crucible is for the solo developer who just wants to know whether the last handful of commits helped. Everything runs on one machine, from a single binary, backed by SQLite. See [Why Crucible exists](docs/motivation.md) for the longer version.
 
 The full documentation lives at **<https://sb2bg.github.io/crucible>**, or under [`docs/`](docs/) in this repository.
 
@@ -58,6 +58,7 @@ For a Docker-based setup, see [Getting started](docs/getting-started.md).
 
 ## Documentation
 
+- [Why Crucible exists](docs/motivation.md)
 - [Getting started](docs/getting-started.md)
 - [Recommended workflow](docs/workflow.md)
 - [Configuration reference](docs/configuration.md)

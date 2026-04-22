@@ -345,6 +345,7 @@ enum GateTaskKind {
     HeadToHead,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_gate_tasks(
     config: &Config,
     candidate_binary: &Path,

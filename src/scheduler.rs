@@ -122,9 +122,8 @@ impl Scheduler {
         // Is it the HEAD of its branch?
         let is_head = all_revisions
             .iter()
-            .filter(|r| r.branch == rev.branch)
-            .last()
-            .map_or(false, |last| last.id == rev.id);
+            .rfind(|r| r.branch == rev.branch)
+            .is_some_and(|last| last.id == rev.id);
 
         if is_head {
             prio = prio.max(priority::BRANCH_HEAD);

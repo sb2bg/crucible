@@ -1144,6 +1144,7 @@ fn json_error(status: StatusCode, err: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn authorize_admin(headers: &HeaderMap, state: &WebState) -> Result<(), Response> {
     let config = current_config(state);
     let Some(expected_token) = config.server.admin_token.as_deref() else {

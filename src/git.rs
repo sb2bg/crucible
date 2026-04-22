@@ -201,7 +201,7 @@ impl GitManager {
             // If we have a start point, skip until we find it
             if !started {
                 if let Some(start) = since {
-                    if hash.starts_with(start) || tags.get(&hash).map_or(false, |t| t == start) {
+                    if hash.starts_with(start) || tags.get(&hash).is_some_and(|t| t == start) {
                         started = true;
                         matched_start = true;
                     } else {
@@ -211,9 +211,9 @@ impl GitManager {
             }
 
             let tag = tags.get(&hash).cloned();
-            let is_release = tag.as_ref().map_or(false, |t| {
-                t.starts_with('v') || t.starts_with('V') || t.contains("release")
-            });
+            let is_release = tag
+                .as_ref()
+                .is_some_and(|t| t.starts_with('v') || t.starts_with('V') || t.contains("release"));
 
             let message = commit
                 .message()

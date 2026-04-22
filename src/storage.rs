@@ -829,6 +829,7 @@ impl Storage {
         Ok(reset)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_job_result(
         &self,
         job_id: &str,

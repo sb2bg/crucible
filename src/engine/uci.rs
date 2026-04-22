@@ -170,6 +170,7 @@ impl UciEngine {
     }
 
     /// Set position and make the engine search
+    #[allow(clippy::too_many_arguments)]
     pub fn go_position(
         &mut self,
         position: &str,

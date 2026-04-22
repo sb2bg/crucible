@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
             if engines.is_empty() {
                 println!("No engines tracked. Run `crucible add` first.");
             } else {
-                println!("{:<20} {:<40} {}", "NAME", "REPO", "BRANCHES");
+                println!("{:<20} {:<40} BRANCHES", "NAME", "REPO");
                 println!("{}", "─".repeat(80));
                 for e in &engines {
                     println!(
@@ -674,10 +674,8 @@ async fn run_test_loop(storage: Storage, shared_config: SharedConfig) {
 
         tokio::select! {
             result = workers.join_next() => {
-                if let Some(result) = result {
-                    if let Err(err) = result {
-                        tracing::error!("Job worker task panicked: {}", err);
-                    }
+                if let Some(Err(err)) = result {
+                    tracing::error!("Job worker task panicked: {}", err);
                 }
             }
             _ = tokio::time::sleep_until(next_poll_at) => {}

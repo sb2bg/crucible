@@ -215,6 +215,7 @@ fn build_test_result(
 }
 
 /// Play a single game between two engines
+#[allow(clippy::too_many_arguments)]
 async fn play_single_game(
     dev_binary: &Path,
     base_binary: &Path,
@@ -254,6 +255,7 @@ async fn play_single_game(
     .await?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play_game_blocking(
     dev_binary: &Path,
     base_binary: &Path,

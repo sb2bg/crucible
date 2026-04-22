@@ -48,10 +48,11 @@ pub enum TrainingRunKind {
     Idle,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingRunStatus {
     Running,
+    #[default]
     Completed,
     Cancelled,
     Failed,
@@ -62,12 +63,6 @@ pub enum TrainingRunStatus {
 pub enum TrainingDepthMode {
     Exact,
     Min,
-}
-
-impl Default for TrainingRunStatus {
-    fn default() -> Self {
-        Self::Completed
-    }
 }
 
 impl std::fmt::Display for TrainingRunStatus {
@@ -312,16 +307,16 @@ impl TrainingRunWriter {
             *entry += 1;
             self.metadata.samples_written += 1;
 
-            if !writers.contains_key(&sample.depth) {
-                let path = self
-                    .run_dir
-                    .join(format!("depth-{:03}.jsonl", sample.depth));
-                let file = OpenOptions::new().create(true).append(true).open(path)?;
-                writers.insert(sample.depth, BufWriter::new(file));
-            }
-            let writer = writers
-                .get_mut(&sample.depth)
-                .expect("writer inserted for depth bucket");
+            let writer = match writers.entry(sample.depth) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let path = self
+                        .run_dir
+                        .join(format!("depth-{:03}.jsonl", sample.depth));
+                    let file = OpenOptions::new().create(true).append(true).open(path)?;
+                    entry.insert(BufWriter::new(file))
+                }
+            };
 
             let (score_cp, score_mate) = match sample.score {
                 Some(SearchScore::Cp(value)) => (Some(value), None),
@@ -464,12 +459,7 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
     )?;
 
     let outcome = (|| -> Result<SelfPlayDataSummary> {
-        let mut batch_games_played = 0;
-        for opening in openings.iter().cycle() {
-            if batch_games_played >= config.games {
-                break;
-            }
-
+        for opening in openings.iter().cycle().take(config.games as usize) {
             let game_number = writer.games_played() + 1;
             let samples = play_selfplay_game(
                 &config.binary_path,
@@ -481,7 +471,6 @@ pub fn run_selfplay_data_generation(config: SelfPlayDataConfig) -> Result<SelfPl
             )?;
             writer.record_game(game_number)?;
             writer.append_samples(&samples)?;
-            batch_games_played += 1;
         }
 
         writer.set_status(TrainingRunStatus::Completed)?;

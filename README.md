@@ -5,7 +5,7 @@
 [![latest release](https://img.shields.io/github/v/release/sb2bg/crucible?display_name=tag&sort=semver)](https://github.com/sb2bg/crucible/releases/latest)
 [![license](https://img.shields.io/github/license/sb2bg/crucible)](LICENSE)
 
-[![Experiments screenshot](https://github.com/sb2bg/crucible/raw/main/docs/assets/experiments.png)](https://sb2bg.github.io/crucible/)
+[![Experiments screenshot](https://github.com/sb2bg/crucible/blob/main/assets/experiments.png?raw=true)](https://sb2bg.github.io/crucible/)
 
 Crucible is continuous integration for chess engines. It watches your engine's git history, builds every commit, plays it against its predecessor under the Sequential Probability Ratio Test, and shows you an Elo timeline so you can see which changes made the engine stronger or weaker.
 

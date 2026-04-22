@@ -41,6 +41,7 @@ The dashboard is backed by a small HTTP API. Public routes live under `/api/` an
 
 Public routes:
 
+- `GET /api/health`
 - `GET /api/status`
 - `GET /api/engines`
 - `GET /api/timeline/:engine_id`
@@ -60,3 +61,20 @@ Admin routes:
 - `GET /api/admin/export`
 
 Admin requests need an `Authorization: Bearer <token>` header when `server.admin_token` is set.
+
+## Health checks
+
+`GET /api/health` returns a small unauthenticated JSON response:
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-04-22T12:00:00Z"
+}
+```
+
+The health endpoint deliberately avoids SQLite and other shared daemon state. Use it to separate web-server liveness from storage-backed API health:
+
+- If `/api/health` responds but `/api/status` hangs, the Axum server is reachable and the issue is likely in SQLite or another shared resource.
+- If `/api/health` also hangs, the web runtime is likely starved or the container/network path is blocked.
+- If `/api/health` is refused, the process is down or not listening on the configured address.

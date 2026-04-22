@@ -78,6 +78,7 @@ pub fn create_router(storage: Storage, config: Arc<RwLock<Config>>) -> Router {
     Router::new()
         .route("/", get(index_handler))
         .route("/favicon.svg", get(favicon_handler))
+        .route("/api/health", get(health_handler))
         .route("/api/status", get(status_handler))
         .route("/api/engines", get(engines_handler))
         .route("/api/timeline/:engine_id", get(timeline_handler))
@@ -263,6 +264,13 @@ async fn favicon_handler() -> impl IntoResponse {
         ],
         FAVICON_SVG,
     )
+}
+
+async fn health_handler() -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "timestamp": Utc::now().to_rfc3339(),
+    }))
 }
 
 async fn status_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -1159,27 +1167,4 @@ fn authorize_admin(headers: &HeaderMap, state: &WebState) -> Result<(), Response
 
 /// The dashboard as a single embedded HTML page.
 const DASHBOARD_HTML: &str = include_str!("../../templates/dashboard.html");
-const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#17212d"/>
-      <stop offset="100%" stop-color="#090e14"/>
-    </linearGradient>
-    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#ffd782"/>
-      <stop offset="55%" stop-color="#ff9a3d"/>
-      <stop offset="100%" stop-color="#e4572e"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
-  <path
-    d="M45.5 18.8c-3.2-3.4-7.9-5.3-13.1-5.3-9.8 0-17.9 7.5-17.9 18.4 0 10.7 7.7 18.6 18.4 18.6 5.1 0 9.6-1.8 12.7-5.2l-6.1-6.3c-1.8 1.8-4 2.8-6.5 2.8-5.8 0-9.1-4.3-9.1-9.9 0-5.9 3.7-9.8 9-9.8 2.5 0 4.8 1 6.7 3z"
-    fill="url(#ember)"
-  />
-  <path
-    d="M18 18.5h26.5l-3.2 5.4H21.2z"
-    fill="#fff2cf"
-    opacity=".82"
-  />
-</svg>
-"##;
+const FAVICON_SVG: &str = include_str!("favicon.svg");

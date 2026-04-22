@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-22
+
 ### Added
 
 - Release gate summaries now report Elo, standard error, and LOS for each side.
@@ -23,4 +25,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Interrupted jobs are re-queued on daemon restart instead of being stuck in the `Running` state.
 
-[Unreleased]: https://github.com/sb2bg/crucible/compare/HEAD...HEAD
+[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0-rc.1...HEAD
+[0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0-rc.1

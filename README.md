@@ -15,13 +15,30 @@ The full documentation lives at **<https://sb2bg.github.io/crucible>**, or under
 
 ## Quick start
 
-Install from crates.io:
+Choose either Docker or a local Cargo install. Docker is convenient for a long-running daemon with a bundled build environment; Cargo is usually simpler when your engine already builds on the host or depends on unusual local toolchains.
+
+With Docker:
+
+```bash
+docker run --rm \
+  -v "$PWD:/work" \
+  ghcr.io/sb2bg/crucible:latest init
+
+# edit crucible.toml, then:
+docker compose up -d
+```
+
+The web dashboard opens at <http://localhost:8877>. If you bind the dashboard outside the container with `web_host = "0.0.0.0"`, Crucible requires a real `server.admin_token`.
+
+The published image includes common engine tools for Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip. Haskell, unusual SDK versions, host-specific dependencies, and several incompatible runtimes are often easier with a local install; Docker can still work with a custom image or mounted toolchain. See [Docker](docs/docker.md) and [Engine runtimes](docs/engine-runtimes.md).
+
+With Cargo:
 
 ```bash
 cargo install crucible-chess
 ```
 
-This puts a `crucible` binary on your `PATH`. The crate is named `crucible-chess` because plain `crucible` is taken on crates.io; the binary, library, and command-line interface are unaffected.
+This puts a `crucible` binary on your `PATH`; run `crucible init`, add your engine, then run `crucible run`. The crate is named `crucible-chess` because plain `crucible` is taken on crates.io; the binary, library, and command-line interface are unaffected.
 
 Or build from source:
 
@@ -43,8 +60,6 @@ cargo build --release
 
 The web dashboard opens at <http://localhost:8877>. Pass `--tui` to launch the terminal UI alongside the daemon, or run `crucible monitor` in another shell to attach one to a running instance.
 
-For a Docker-based setup, see [Getting started](docs/getting-started.md).
-
 ## Features
 
 - Continuous SPRT testing of every new commit against its predecessor.
@@ -60,8 +75,10 @@ For a Docker-based setup, see [Getting started](docs/getting-started.md).
 
 - [Why Crucible exists](docs/motivation.md)
 - [Getting started](docs/getting-started.md)
+- [Docker](docs/docker.md)
 - [Recommended workflow](docs/workflow.md)
 - [Configuration reference](docs/configuration.md)
+- [Engine runtimes](docs/engine-runtimes.md)
 - [CLI commands](docs/commands.md)
 - [Scheduling](docs/scheduling.md)
 - [Regression hunts](docs/regression-hunts.md)

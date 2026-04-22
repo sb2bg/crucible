@@ -1,7 +1,5 @@
 services:
   crucible:
-    build:
-      context: .
     image: ghcr.io/sb2bg/crucible:latest
     restart: unless-stopped
     ports:

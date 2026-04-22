@@ -63,6 +63,7 @@ const PLACEHOLDER_ADMIN_TOKENS: &[&str] = &[
     "replace_me",
     "replace-this-with-a-random-token",
     "change-this-to-a-secure-random-string",
+    "paste-generated-token-here",
 ];
 
 impl Default for ServerConfig {

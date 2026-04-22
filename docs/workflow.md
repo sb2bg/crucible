@@ -1,6 +1,6 @@
 ---
 title: Recommended workflow
-nav_order: 4
+nav_order: 5
 ---
 
 # Recommended workflow
@@ -13,7 +13,7 @@ Crucible is a daemon. It is designed to sit on one machine, watch a repository, 
 
 The recommended setup is an always-on Linux host: a home server, a mini-PC under your desk, or a cheap VPS. You start the daemon once, leave the dashboard on a local URL you can open from anywhere on the network, and every push to your engine triggers fresh work without you doing anything. This is where Crucible earns its keep, because the backfill queue has time to catch up and the Timeline becomes a real historical record instead of a series of partial runs.
 
-Running it under Docker with the provided Compose file is the easiest path, since the image already includes Zig and pins the SQLite volume for you. See [Getting started](getting-started.md) for the Compose configuration.
+Docker and a local Cargo install are both good long-running options. Docker is convenient when the bundled toolchains fit your engines and you want the SQLite volume pinned by Compose. A local binary is usually simpler when your engine already builds on the host, needs host-specific libraries, or depends on several incompatible runtimes. See [Docker](docker.md) and [Engine runtimes](engine-runtimes.md) for the container tradeoffs.
 
 ### Dedicated desktop
 
@@ -62,18 +62,10 @@ The terminal UI (`crucible monitor`) is a reasonable middle ground over SSH when
 For a new engine on a fresh server:
 
 ```bash
-crucible init
-# edit crucible.toml: set concurrency to your core count, add the engine
+docker run --rm -v "$PWD:/work" ghcr.io/sb2bg/crucible:latest init
+# edit crucible.toml: set concurrency to your core count and add a [[engines]] entry
 
-crucible add \
-  --name my-engine \
-  --repo https://github.com/you/your-engine \
-  --build "make" \
-  --binary-path "out/my-engine" \
-  --branches main \
-  --start-from v0.1.0
-
-crucible run
+docker compose up -d
 ```
 
 Open <http://localhost:8877>, wait an hour, and you should start seeing the earliest commits land on the Timeline. After that, every push to `main` is tested automatically and the curve fills in over time.

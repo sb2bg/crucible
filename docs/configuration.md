@@ -1,6 +1,6 @@
 ---
 title: Configuration reference
-nav_order: 5
+nav_order: 6
 ---
 
 # Configuration reference
@@ -15,8 +15,8 @@ This page documents every field. Defaults are shown in parentheses.
 [server]
 web_port = 8877
 web_host = "127.0.0.1"    # use "0.0.0.0" in Docker
-# Required when web_host is not loopback. Do not use this placeholder.
-admin_token = "replace-this-with-a-random-token"
+# Required when web_host is not loopback. Generate with: openssl rand -hex 32
+# admin_token = "paste-generated-token-here"
 
 [testing]
 concurrency = 4
@@ -83,7 +83,7 @@ start_from = "v1.0.0"
 | `web_port`    | `8877`      | Port the dashboard listens on.                                                                                  |
 | `admin_token` | unset       | Required when `web_host` is not loopback. The dashboard sends it as a `Bearer` token on protected API requests. |
 
-Crucible refuses to start with common placeholder tokens such as `changeme` or `change-me`. The browser client stores the admin token in local storage. Clear the tab data, or use a fresh browser profile, if you want to reset it.
+Crucible refuses to start with common placeholder tokens such as `changeme`, `change-me`, or `paste-generated-token-here`. The browser client stores the admin token in local storage. Clear the tab data, or use a fresh browser profile, if you want to reset it.
 
 ## `[testing]`
 
@@ -183,9 +183,11 @@ If `branches` and `experimental_branches` are both empty, Crucible refuses to st
 
 Engine names are also used as directory names under `data_dir/repos`, so they must be a single path component and cannot contain `/`, `\`, or be `.`/`..`.
 
-## Notes on Zig engines
+## Engine runtimes
 
-The Docker image ships with Zig preinstalled, so you can point `build_cmd` at a Zig build invocation without any extra setup. A typical entry for a Zig engine looks like this:
+Crucible can test any UCI engine that can be built and executed on the host or inside the container. The published Docker image includes common Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip tools. Zig is pinned to `0.15.2`. Haskell, unusual SDK versions, host-specific dependencies, and other version-sensitive ecosystems are often simpler with a local binary; Docker can still work with a custom image or mounted toolchain. See [Docker](docker.md) and [Engine runtimes](engine-runtimes.md) for examples.
+
+A typical entry for a Zig engine looks like this:
 
 ```toml
 [[engines]]

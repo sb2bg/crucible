@@ -1,6 +1,6 @@
 ---
 title: CI and releases
-nav_order: 14
+nav_order: 16
 ---
 
 # CI and releases
@@ -34,7 +34,7 @@ Tags applied to pushed images:
 - `type=ref,event=branch` and `type=ref,event=pr` for non-main branches and pull requests, for easy ad-hoc testing.
 - `type=sha` for every build.
 
-The `Dockerfile` uses a two-stage build. The first stage compiles a release binary against `rust:1.94.1-bookworm`; the second stage copies it into a slim Debian base that also includes Zig, so the image can build Zig-based engines out of the box.
+The `Dockerfile` uses a two-stage build. The first stage compiles a release binary against `rust:1.94.1-bookworm`; the second stage copies it into a .NET SDK Debian base with common engine tools for Rust `1.94.1`, C/C++, Zig `0.15.2`, Java/Maven, JavaScript/npm, and Python/pip. Larger or version-sensitive SDKs such as Haskell and non-default Rust/.NET versions are left to custom images or mounted toolchains.
 
 ## Releases
 

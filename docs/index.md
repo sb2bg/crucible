@@ -23,10 +23,12 @@ Most chess engine testing platforms, such as [OpenBench](https://github.com/Andy
 ## Where to go next
 
 1. If you want context first, read [Why Crucible exists](motivation.md).
-2. [Getting started](getting-started.md) to install Crucible and set up your first engine.
-3. Read the [Recommended workflow](workflow.md) for how to host the daemon and use it day to day.
-4. Keep the [configuration reference](configuration.md) open while you edit `crucible.toml`.
-5. Look at [CLI commands](commands.md) when you want to queue a one-off test, start a regression hunt, or run a release gate.
-6. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
+2. [Getting started](getting-started.md) to choose Docker or Cargo and set up your first engine.
+3. Use the [Docker](docker.md) guide if you want the container setup.
+4. Read the [Recommended workflow](workflow.md) for day-to-day use.
+5. Keep the [configuration reference](configuration.md) open while you edit `crucible.toml`.
+6. Check [Engine runtimes](engine-runtimes.md) if your engine needs a compiler/runtime.
+7. Look at [CLI commands](commands.md) when you want to queue a one-off test, start a regression hunt, or run a release gate.
+8. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
 
 The source and issue tracker are at [github.com/sb2bg/crucible](https://github.com/sb2bg/crucible).

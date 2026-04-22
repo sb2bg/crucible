@@ -14,7 +14,7 @@ Crucible is pre-1.0. Security fixes are applied to the `main` branch and include
 
 Please report vulnerabilities privately. Do **not** open a public GitHub issue for anything that looks security-sensitive.
 
-The preferred channel is GitHub's [private vulnerability reporting](https://github.com/sb2bg/crucible/security/advisories/new). If that is not available to you, email **sullivanbognar@utexas.edu** with a clear subject line that starts with `[Crucible security]`.
+The preferred channel is GitHub's [private vulnerability reporting](https://github.com/sb2bg/crucible/security/advisories/new).
 
 A good report includes:
 

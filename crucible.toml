@@ -1,10 +1,10 @@
 [server]
 web_port = 8877
-web_host = "0.0.0.0"     # bind externally for Docker port publishing
-admin_token = "wekjfhwkjehqqedwefdweswecjuegrtfs"
+web_host = "127.0.0.1"     # use "0.0.0.0" with admin_token in Docker
+# admin_token = "changeme"   # set to a random value in production
 
 [testing]
-concurrency = 4           # Test jobs to run in parallel
+concurrency = 4            # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance

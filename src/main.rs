@@ -9,7 +9,10 @@ use tracing_subscriber::EnvFilter;
 
 use crucible::bisect::{BisectAction, BisectRunner, BisectStep};
 use crucible::chess_rules::load_opening_book;
-use crucible::config::Config;
+use crucible::config::{
+    engine_repo_path, validate_engine_binary_path, validate_engine_name,
+    validate_engine_storage_path, Config,
+};
 use crucible::engine::match_runner::{
     run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
 };
@@ -260,7 +263,34 @@ async fn main() -> Result<()> {
             start_from,
         } => {
             let storage = open_storage(&config)?;
+            let name = name.trim().to_string();
+            let repo = repo.trim().to_string();
+            let build = build.trim().to_string();
+            let binary_path = binary_path.trim().to_string();
+            validate_engine_name(&name)?;
+            validate_engine_binary_path(&binary_path)?;
+            if repo.is_empty() {
+                anyhow::bail!("engine repo cannot be empty");
+            }
+            if build.is_empty() {
+                anyhow::bail!("engine build command cannot be empty");
+            }
             let existing = storage.get_engine_by_name(&name)?;
+            let local_path = engine_repo_path(&config.data_dir, &name)?;
+
+            let branches = branches
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            let experimental_branches = experimental_branches
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if branches.is_empty() && experimental_branches.is_empty() {
+                anyhow::bail!("engine must define branches and/or experimental branches");
+            }
 
             let engine = crucible::types::Engine {
                 id: existing
@@ -269,17 +299,9 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 name: name.clone(),
                 repo_url: repo.clone(),
-                local_path: config.data_dir.join("repos").join(&name),
-                branches: branches
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-                experimental_branches: experimental_branches
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
+                local_path,
+                branches,
+                experimental_branches,
                 build_cmd: build,
                 binary_path,
                 start_from,
@@ -323,6 +345,7 @@ async fn main() -> Result<()> {
             }
 
             if delete_data && local_path.exists() {
+                validate_engine_storage_path(&config.data_dir, &local_path)?;
                 std::fs::remove_dir_all(&local_path).with_context(|| {
                     format!(
                         "Failed to remove engine data directory '{}'",
@@ -795,7 +818,7 @@ fn sync_config_engines(storage: &Storage, config: &Config) -> Result<()> {
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: engine_cfg.name.clone(),
             repo_url: engine_cfg.repo.clone(),
-            local_path: config.data_dir.join("repos").join(&engine_cfg.name),
+            local_path: engine_repo_path(&config.data_dir, &engine_cfg.name)?,
             branches: engine_cfg.branches.clone(),
             experimental_branches: engine_cfg.experimental_branches.clone(),
             build_cmd: engine_cfg.build_cmd.clone(),

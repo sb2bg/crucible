@@ -69,12 +69,13 @@ Pass `--tui` to the same command to launch the terminal UI alongside the daemon,
 
 ## Running with Docker
 
-A published image is available at `ghcr.io/sb2bg/crucible`. To run it with the bundled Compose file, first set `web_host = "0.0.0.0"` in your config so the dashboard is reachable from outside the container:
+A published image is available at `ghcr.io/sb2bg/crucible`. To run it with the bundled Compose file, first set `web_host = "0.0.0.0"` and a real `admin_token` in your config so the dashboard is reachable from outside the container without using a shared placeholder token:
 
 ```toml
 [server]
 web_host = "0.0.0.0"
 web_port = 8877
+admin_token = "replace-this-with-a-random-token"
 ```
 
 Then start the stack:
@@ -102,7 +103,7 @@ The Docker image also ships with Zig preinstalled, which is convenient if your e
 
 ## Exposing the dashboard
 
-If you put the dashboard on a public network, place it behind an authentication layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control. You can also set `server.admin_token` in your config to require a bearer token on every `/api/admin/*` route. The browser client stores the token in local storage until you clear it.
+If you put the dashboard on a public network, place it behind an authentication layer such as Cloudflare Access, Tailscale, or a reverse proxy with access control. Crucible also requires `server.admin_token` whenever `server.web_host` is not loopback. The browser client stores the token in local storage until you clear it.
 
 ## Where to go next
 

@@ -6,10 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Changed
-
-- Renamed the crate to `crucible-chess` for crates.io publishing. The binary and library names remain `crucible`, so `cargo install crucible-chess` still produces a `crucible` executable and `use crucible::...` imports continue to work unchanged.
-
 ## [0.1.0] - 2026-04-22
 
 ### Added
@@ -22,12 +18,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Opening books are now read as EPD files. Lines are FEN fragments followed by optional EPD operations; full six-field FEN lines are no longer accepted.
 - Docker images tagged `edge` track the `main` branch; `latest` now points at the most recent release tag only.
+- Opening books are now read as EPD files. Lines are FEN fragments followed by optional EPD operations; full six-field FEN lines are no longer accepted.
+- Renamed the crate to `crucible-chess` for crates.io publishing. The binary and library names remain `crucible`, so `cargo install crucible-chess` still produces a `crucible` executable and `use crucible::...` imports continue to work unchanged.
 
 ### Fixed
 
 - Interrupted jobs are re-queued on daemon restart instead of being stuck in the `Running` state.
 
-[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0-rc.2...HEAD
-[0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0-rc.2
+### Security
+
+- Require a non-placeholder `server.admin_token` when the dashboard binds to a non-loopback address.
+- Protect training-run, revision-detail, and compare APIs with the admin token.
+- Validate engine names and binary paths before storing or using them, and refuse build artifact copies or engine-data deletes outside managed repository directories.
+- Redact engine build commands and binary paths from the public engine API.
+
+[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0

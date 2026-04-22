@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -43,7 +43,8 @@ pub struct ServerConfig {
     pub web_port: u16,
     #[serde(default = "default_web_host")]
     pub web_host: String,
-    /// Optional bearer token required for /api/admin/* routes
+    /// Optional bearer token required for protected dashboard routes.
+    /// Required when web_host is not loopback.
     pub admin_token: Option<String>,
 }
 
@@ -53,6 +54,16 @@ fn default_web_port() -> u16 {
 fn default_web_host() -> String {
     "127.0.0.1".into()
 }
+
+const PLACEHOLDER_ADMIN_TOKENS: &[&str] = &[
+    "change-me",
+    "changeme",
+    "change_me",
+    "replace-me",
+    "replace_me",
+    "replace-this-with-a-random-token",
+    "change-this-to-a-secure-random-string",
+];
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -297,6 +308,94 @@ fn default_branches() -> Vec<String> {
     vec!["main".into()]
 }
 
+pub fn validate_engine_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("engine name cannot be empty");
+    }
+    if name != name.trim() {
+        anyhow::bail!("engine name cannot have leading or trailing whitespace");
+    }
+    if name.contains('/') || name.contains('\\') {
+        anyhow::bail!("engine name must be a single path component");
+    }
+
+    let path = Path::new(name);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => anyhow::bail!("engine name must be a single path component"),
+    }
+}
+
+pub fn validate_engine_binary_path(binary_path: &str) -> Result<()> {
+    if binary_path.trim().is_empty() {
+        anyhow::bail!("engine binary_path cannot be empty");
+    }
+    if binary_path != binary_path.trim() {
+        anyhow::bail!("engine binary_path cannot have leading or trailing whitespace");
+    }
+    if binary_path.contains('\\') {
+        anyhow::bail!("engine binary_path must use '/' separators");
+    }
+
+    let path = Path::new(binary_path);
+    if path.is_absolute() {
+        anyhow::bail!("engine binary_path must be relative to the repository root");
+    }
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!("engine binary_path cannot contain '.', '..', or root components");
+    }
+
+    Ok(())
+}
+
+pub fn engine_repo_path(data_dir: &Path, engine_name: &str) -> Result<PathBuf> {
+    validate_engine_name(engine_name)?;
+    Ok(data_dir.join("repos").join(engine_name))
+}
+
+pub fn validate_engine_storage_path(data_dir: &Path, local_path: &Path) -> Result<()> {
+    let repos_root = data_dir
+        .join("repos")
+        .canonicalize()
+        .map_err(|err| anyhow::anyhow!("could not resolve repo data directory: {}", err))?;
+    let target = local_path
+        .canonicalize()
+        .map_err(|err| anyhow::anyhow!("could not resolve engine data directory: {}", err))?;
+
+    if !target.starts_with(&repos_root) {
+        anyhow::bail!(
+            "refusing to delete engine data outside '{}'",
+            repos_root.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn is_loopback_web_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback())
+}
+
+fn token_is_placeholder(token: &str) -> bool {
+    let normalized = token.trim().to_ascii_lowercase();
+    PLACEHOLDER_ADMIN_TOKENS.contains(&normalized.as_str())
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -469,6 +568,17 @@ impl Config {
             anyhow::bail!("testing.time_control.nodes must be greater than 0 when set");
         }
         for engine in &self.engines {
+            validate_engine_name(&engine.name)
+                .map_err(|err| anyhow::anyhow!("invalid engine '{}': {}", engine.name, err))?;
+            validate_engine_binary_path(&engine.binary_path).map_err(|err| {
+                anyhow::anyhow!("invalid engine '{}' binary_path: {}", engine.name, err)
+            })?;
+            if engine.repo.trim().is_empty() {
+                anyhow::bail!("engine '{}' repo cannot be empty", engine.name);
+            }
+            if engine.build_cmd.trim().is_empty() {
+                anyhow::bail!("engine '{}' build_cmd cannot be empty", engine.name);
+            }
             if engine.branches.is_empty() && engine.experimental_branches.is_empty() {
                 anyhow::bail!(
                     "engine '{}' must define branches and/or experimental_branches",
@@ -488,14 +598,65 @@ impl Config {
         if self.testing.sprt.min_games == 0 {
             anyhow::bail!("testing.sprt.min_games must be at least 1");
         }
-        if self
-            .server
-            .admin_token
-            .as_deref()
-            .is_some_and(|token| token.trim().is_empty())
-        {
-            anyhow::bail!("server.admin_token cannot be empty when set");
+        match self.server.admin_token.as_deref() {
+            Some(token) if token.trim().is_empty() => {
+                anyhow::bail!("server.admin_token cannot be empty when set");
+            }
+            Some(token) if token_is_placeholder(token) => {
+                anyhow::bail!("server.admin_token must be changed from the placeholder value");
+            }
+            _ => {}
+        }
+        if !is_loopback_web_host(&self.server.web_host) && self.server.admin_token.is_none() {
+            anyhow::bail!(
+                "server.admin_token is required when server.web_host is not a loopback address"
+            );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, ServerConfig};
+
+    #[test]
+    fn rejects_placeholder_admin_token() {
+        let mut config = Config::default();
+        config.server.admin_token = Some("changeme".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn requires_admin_token_for_non_loopback_hosts() {
+        let mut config = Config::default();
+        config.server.web_host = "0.0.0.0".into();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn allows_tokenless_loopback_hosts() {
+        let config = Config {
+            server: ServerConfig {
+                web_host: "127.0.0.1".into(),
+                admin_token: None,
+                ..ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_engine_paths() {
+        let contents = r#"
+[[engines]]
+name = "../outside"
+repo = "https://example.invalid/repo.git"
+branches = ["main"]
+build_cmd = "make"
+binary_path = "../engine"
+"#;
+        assert!(Config::parse(contents).is_err());
     }
 }

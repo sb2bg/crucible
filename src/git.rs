@@ -323,6 +323,20 @@ impl GitManager {
         if !src_binary.exists() {
             anyhow::bail!("Binary not found at {:?} after build", src_binary);
         }
+        let repo_root = self
+            .local_path
+            .canonicalize()
+            .context("Failed to resolve repository root")?;
+        let src_binary = src_binary.canonicalize().with_context(|| {
+            format!("Failed to resolve built binary '{}'", src_binary.display())
+        })?;
+        if !src_binary.starts_with(&repo_root) {
+            anyhow::bail!(
+                "Built binary '{}' is outside repository root '{}'",
+                src_binary.display(),
+                repo_root.display()
+            );
+        }
 
         let dest_dir = self.local_path.join(".crucible-builds");
         std::fs::create_dir_all(&dest_dir)?;

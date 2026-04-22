@@ -20,7 +20,10 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::bisect::{BisectRunner, BisectStep};
-use crate::config::Config;
+use crate::config::{
+    engine_repo_path, validate_engine_binary_path, validate_engine_name,
+    validate_engine_storage_path, Config,
+};
 use crate::export::build_export_bundle;
 use crate::gate::{
     default_gate_output_path, gate_profile_summaries, list_gate_runs, resolve_gate_profile,
@@ -127,6 +130,16 @@ struct AddEngineRequest {
     experimental_branches: Vec<String>,
     build_cmd: String,
     binary_path: String,
+    start_from: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEngine {
+    id: String,
+    name: String,
+    repo_url: String,
+    branches: Vec<String>,
+    experimental_branches: Vec<String>,
     start_from: Option<String>,
 }
 
@@ -282,7 +295,9 @@ async fn status_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse
 
 async fn engines_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     match state.storage.get_engines() {
-        Ok(engines) => Json(serde_json::to_value(engines).unwrap()).into_response(),
+        Ok(engines) => {
+            Json(engines.into_iter().map(public_engine).collect::<Vec<_>>()).into_response()
+        }
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err),
     }
 }
@@ -339,7 +354,13 @@ async fn active_bisect_sessions_handler(State(state): State<Arc<WebState>>) -> i
     }
 }
 
-async fn training_runs_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+async fn training_runs_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     let config = current_config(&state);
     match list_training_runs(&config.training.output_dir) {
         Ok(runs) => Json(json!({ "runs": runs })).into_response(),
@@ -369,8 +390,12 @@ async fn list_gate_runs_handler(
 
 async fn revision_details_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path((engine_id, revision_ref)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     match load_revision_details(&state, &engine_id, &revision_ref) {
         Ok(payload) => Json(serde_json::to_value(payload).unwrap()).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
@@ -379,9 +404,13 @@ async fn revision_details_handler(
 
 async fn compare_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path(engine_id): Path<String>,
     Query(query): Query<CompareQuery>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_admin(&headers, &state) {
+        return response;
+    }
     match load_compare_details(&state, &engine_id, &query.base, &query.head) {
         Ok(payload) => Json(serde_json::to_value(payload).unwrap()).into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
@@ -696,7 +725,15 @@ async fn delete_engine_handler(
     match state.storage.delete_engine(&engine_id) {
         Ok(true) => {
             if engine.local_path.exists() {
-                if let Err(err) = std::fs::remove_dir_all(&engine.local_path) {
+                let config = current_config(&state);
+                if let Err(err) = validate_engine_storage_path(&config.data_dir, &engine.local_path)
+                {
+                    warn!(
+                        "Refusing to remove repo directory '{}': {}",
+                        engine.local_path.display(),
+                        err
+                    );
+                } else if let Err(err) = std::fs::remove_dir_all(&engine.local_path) {
                     warn!(
                         "Failed to remove repo directory '{}': {}",
                         engine.local_path.display(),
@@ -798,20 +835,32 @@ fn create_or_update_engine(
     branches: Vec<String>,
     experimental_branches: Vec<String>,
 ) -> anyhow::Result<Engine> {
-    let existing = state.storage.get_engine_by_name(request.name.trim())?;
+    let name = request.name.trim();
+    let repo = request.repo.trim();
+    let build_cmd = request.build_cmd.trim();
+    let binary_path = request.binary_path.trim();
+    validate_engine_name(name)?;
+    validate_engine_binary_path(binary_path)?;
+    if repo.is_empty() {
+        anyhow::bail!("engine repo cannot be empty");
+    }
+    if build_cmd.is_empty() {
+        anyhow::bail!("engine build command cannot be empty");
+    }
+    let existing = state.storage.get_engine_by_name(name)?;
     let config = current_config(state);
     let engine = Engine {
         id: existing
             .as_ref()
             .map(|engine| engine.id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        name: request.name.trim().to_string(),
-        repo_url: request.repo.trim().to_string(),
-        local_path: config.data_dir.join("repos").join(request.name.trim()),
+        name: name.to_string(),
+        repo_url: repo.to_string(),
+        local_path: engine_repo_path(&config.data_dir, name)?,
         branches,
         experimental_branches,
-        build_cmd: request.build_cmd.trim().to_string(),
-        binary_path: request.binary_path.trim().to_string(),
+        build_cmd: build_cmd.to_string(),
+        binary_path: binary_path.to_string(),
         start_from: request
             .start_from
             .map(|value| value.trim().to_string())
@@ -819,6 +868,17 @@ fn create_or_update_engine(
     };
     state.storage.insert_engine(&engine)?;
     Ok(engine)
+}
+
+fn public_engine(engine: Engine) -> PublicEngine {
+    PublicEngine {
+        id: engine.id,
+        name: engine.name,
+        repo_url: engine.repo_url,
+        branches: engine.branches,
+        experimental_branches: engine.experimental_branches,
+        start_from: engine.start_from,
+    }
 }
 
 fn engine_branch_is_experimental(engine: &Engine, branch: &str) -> bool {

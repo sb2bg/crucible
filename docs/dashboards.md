@@ -22,7 +22,7 @@ By default the dashboard listens on <http://localhost:8877>. It is a single page
 - **Gate**: completed and running release gates, with download links for each summary.
 - **Admin**: add and remove engines, queue manual tests, start regression hunts, cancel jobs, and download the JSON export bundle.
 
-If `server.admin_token` is set, the Admin tab prompts for the token and stores it in the browser's local storage.
+If `server.admin_token` is set, the Admin tab prompts for the token and stores it in the browser's local storage. A token is required whenever the dashboard binds to a non-loopback address.
 
 [![Jobs tab](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)
 
@@ -43,7 +43,7 @@ Run the terminal UI alongside the daemon with `crucible run --tui`, or attach it
 
 ## HTTP API
 
-The dashboard is backed by a small HTTP API. Public routes live under `/api/` and are safe to expose. Admin routes live under `/api/admin/` and are protected by `server.admin_token` when it is set.
+The dashboard is backed by a small HTTP API. `GET /api/health` is intended for unauthenticated health checks. Other dashboard API routes can expose project metadata such as engine names, branches, commit hashes, and test status, so do not treat them as a public internet API. Admin and source-detail routes are protected by `server.admin_token` when it is set.
 
 Public routes:
 
@@ -66,7 +66,7 @@ Admin routes:
 - `GET /api/admin/gates`, `POST /api/admin/gates`, `GET /api/admin/gates/:file_name`, `POST /api/admin/gates/:gate_id/cancel`
 - `GET /api/admin/export`
 
-Admin requests need an `Authorization: Bearer <token>` header when `server.admin_token` is set.
+Protected requests need an `Authorization: Bearer <token>` header when `server.admin_token` is set.
 
 ## Health checks
 

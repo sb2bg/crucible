@@ -1045,7 +1045,7 @@
     <div class="panel-head">
       <div>
         <h2 class="panel-title">Admin</h2>
-        <p class="panel-subtitle">optional bearer token can be stored locally in this browser</p>
+        <p class="panel-subtitle">bearer token for protected dashboard actions</p>
       </div>
       <div class="controls">
         <input id="admin-token-input" placeholder="admin bearer token" style="min-width:240px;">
@@ -1227,7 +1227,7 @@
       'Content-Type': 'application/json',
       ...(options.headers || {})
     };
-    if (path.startsWith('/api/admin/') && state.adminToken) {
+    if (requiresAdminToken(path) && state.adminToken) {
       headers.Authorization = `Bearer ${state.adminToken}`;
     }
     const response = await fetch(path, {
@@ -1242,6 +1242,13 @@
       throw new Error(payload.error || response.statusText || 'Request failed');
     }
     return payload;
+  }
+
+  function requiresAdminToken(path) {
+    return path.startsWith('/api/admin/')
+      || path.startsWith('/api/revisions/')
+      || path.startsWith('/api/compare/')
+      || path.startsWith('/api/training/runs');
   }
 
   async function downloadExport() {
@@ -1513,13 +1520,17 @@
           ${engine.branches.map(branch => `<span class="tag">${escapeHtml(branch)}</span>`).join('')}
           ${engine.experimental_branches.map(branch => `<span class="tag">exp ${escapeHtml(branch)}</span>`).join('')}
         </div>
-        <div class="meta" style="margin-top:8px;">
-          build <code>${escapeHtml(engine.build_cmd)}</code><br>
-          binary <code>${escapeHtml(engine.binary_path)}</code>
-          ${engine.start_from ? `<br>start_from <code>${escapeHtml(engine.start_from)}</code>` : ''}
-        </div>
+        ${renderEngineMeta(engine)}
       </div>
     `).join('');
+  }
+
+  function renderEngineMeta(engine) {
+    const rows = [];
+    if (engine.build_cmd) rows.push(`build <code>${escapeHtml(engine.build_cmd)}</code>`);
+    if (engine.binary_path) rows.push(`binary <code>${escapeHtml(engine.binary_path)}</code>`);
+    if (engine.start_from) rows.push(`start_from <code>${escapeHtml(engine.start_from)}</code>`);
+    return rows.length ? `<div class="meta" style="margin-top:8px;">${rows.join('<br>')}</div>` : '';
   }
 
   function renderAdminEngineList() {

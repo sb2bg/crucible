@@ -15,7 +15,7 @@ The fastest path if you already have a Rust toolchain:
 cargo install crucible-chess
 ```
 
-This drops a `crucible` executable on your `PATH`. The crate is named `crucible-chess` on crates.io because plain `crucible` is taken; the binary, library, and CLI are unaffected by the rename.
+This drops a `crucible` executable on your `PATH`.
 
 ## Building from source
 

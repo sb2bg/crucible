@@ -647,7 +647,15 @@ async fn run_test_loop(storage: Storage, shared_config: SharedConfig) {
         let poll_interval = std::time::Duration::from_secs(config.testing.poll_interval_seconds);
 
         if first_poll || last_poll_at.elapsed() >= poll_interval {
-            sync_and_schedule_engines(&storage, &config);
+            let sync_storage = storage.clone();
+            let sync_config = config.clone();
+            if let Err(err) = tokio::task::spawn_blocking(move || {
+                sync_and_schedule_engines(&sync_storage, &sync_config);
+            })
+            .await
+            {
+                tracing::error!("Sync task panicked: {}", err);
+            }
             last_poll_at = tokio::time::Instant::now();
             first_poll = false;
         }
@@ -865,6 +873,10 @@ fn next_idle_selfplay_task(storage: &Storage, config: &Config) -> Option<IdleSel
 }
 
 async fn run_idle_selfplay_batch(task: IdleSelfplayTask) -> Result<()> {
+    tokio::task::spawn_blocking(move || run_idle_selfplay_batch_blocking(task)).await?
+}
+
+fn run_idle_selfplay_batch_blocking(task: IdleSelfplayTask) -> Result<()> {
     let binary_path = task.revision.binary_path.clone().with_context(|| {
         format!(
             "Revision '{}' does not have a built binary",

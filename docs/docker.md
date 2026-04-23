@@ -67,7 +67,7 @@ The published image is meant to cover common engine setups without becoming a fu
 | Runtime/toolchain | Packages |
 | ----------------- | -------- |
 | Rust              | `rustc`/`cargo` via rustup, default toolchain `1.94.1` |
-| Go                | Go `1.25.3` |
+| Go                | Go `1.26.2` |
 | C/C++             | `build-essential`, `clang`, `cmake`, `make`, `pkg-config` |
 | Zig               | Zig `0.15.2` |
 | .NET/C#           | .NET SDK 8 |

@@ -16,7 +16,7 @@ The published image includes:
 | Runtime/toolchain | Included tools                                            |
 | ----------------- | --------------------------------------------------------- |
 | Rust              | `rustc`/`cargo` via rustup, default toolchain `1.94.1`    |
-| Go                | Go `1.25.3`                                               |
+| Go                | Go `1.26.2`                                               |
 | C/C++             | `build-essential`, `clang`, `cmake`, `make`, `pkg-config` |
 | Zig               | Zig `0.15.2`                                              |
 | .NET/C#           | .NET SDK 8                                                |
@@ -162,7 +162,7 @@ If your engine has a `rust-toolchain.toml`, rustup will honor it. For engines pi
 
 ### Go
 
-The published image includes Go `1.25.3`.
+The published image includes Go `1.26.2`.
 
 ```toml
 [[engines]]

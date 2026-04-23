@@ -22,10 +22,11 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
 
 ARG ZIG_VERSION=0.15.2
 ARG RUST_VERSION=1.94.1
+ARG GO_VERSION=1.26.2
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+    PATH=/usr/local/go/bin:/usr/local/cargo/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -53,6 +54,18 @@ RUN set -eux; \
     rm /tmp/rustup-init.sh; \
     rustc --version; \
     cargo --version
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) go_arch="amd64" ;; \
+      arm64) go_arch="arm64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz" -o /tmp/go.tar.gz; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    go version
 
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \

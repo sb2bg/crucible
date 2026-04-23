@@ -29,6 +29,7 @@ Most chess engine testing platforms, such as [OpenBench](https://github.com/Andy
 5. Keep the [configuration reference](configuration.md) open while you edit `crucible.toml`.
 6. Check [Engine runtimes](engine-runtimes.md) if your engine needs a compiler/runtime.
 7. Look at [CLI commands](commands.md) when you want to queue a one-off test, start a regression hunt, or run a release gate.
-8. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
+8. Read [Experiments](experiments.md) when you start testing ideas on dedicated branches instead of committing directly to `main`.
+9. Read [Architecture](architecture.md) if you want to understand how the pieces fit together.
 
 The source and issue tracker are at [github.com/sb2bg/crucible](https://github.com/sb2bg/crucible).

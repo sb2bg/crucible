@@ -60,7 +60,7 @@ docker compose up -d
 
 The Compose file mounts `crucible.toml` read-only and uses a named Docker volume at `/work/.crucible` for the SQLite database, cloned repositories, and build artifacts.
 
-The published image includes common engine tools for Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip. For Haskell, mounted toolchains, unusual SDK versions, host-specific dependencies, or per-project additions, see [Docker](docker.md) and [Engine runtimes](engine-runtimes.md).
+The published image includes common engine tools for Rust, Go, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip. For Haskell, mounted toolchains, unusual SDK versions, host-specific dependencies, or per-project additions, see [Docker](docker.md) and [Engine runtimes](engine-runtimes.md).
 
 ## Option 2: Cargo
 

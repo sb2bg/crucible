@@ -185,7 +185,7 @@ Engine names are also used as directory names under `data_dir/repos`, so they mu
 
 ## Engine runtimes
 
-Crucible can test any UCI engine that can be built and executed on the host or inside the container. The published Docker image includes common Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip tools. Zig is pinned to `0.15.2`. Haskell, unusual SDK versions, host-specific dependencies, and other version-sensitive ecosystems are often simpler with a local binary; Docker can still work with a custom image or mounted toolchain. See [Docker](docker.md) and [Engine runtimes](engine-runtimes.md) for examples.
+Crucible can test any UCI engine that can be built and executed on the host or inside the container. The published Docker image includes common Rust, Go, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip tools. Zig is pinned to `0.15.2`. Haskell, unusual SDK versions, host-specific dependencies, and other version-sensitive ecosystems are often simpler with a local binary; Docker can still work with a custom image or mounted toolchain. See [Docker](docker.md) and [Engine runtimes](engine-runtimes.md) for examples.
 
 A typical entry for a Zig engine looks like this:
 

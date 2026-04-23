@@ -7,7 +7,7 @@ nav_order: 7
 
 Crucible is language-agnostic only after your engine can be launched as a UCI process. For every revision it tests, Crucible clones the engine repository, runs `build_cmd` inside that clone, then starts the file named by `binary_path`.
 
-For a local Cargo install, `build_cmd` runs on the host and can use whatever compilers, SDKs, libraries, and environment variables you already use to build the engine. For Docker, those same tools must exist inside the Crucible container. The published image includes common Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip tools, but it does not include every possible chess-engine toolchain.
+For a local Cargo install, `build_cmd` runs on the host and can use whatever compilers, SDKs, libraries, and environment variables you already use to build the engine. For Docker, those same tools must exist inside the Crucible container. The published image includes common Rust, Go, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip tools, but it does not include every possible chess-engine toolchain.
 
 ## Docker defaults
 
@@ -16,6 +16,7 @@ The published image includes:
 | Runtime/toolchain | Included tools                                            |
 | ----------------- | --------------------------------------------------------- |
 | Rust              | `rustc`/`cargo` via rustup, default toolchain `1.94.1`    |
+| Go                | Go `1.25.3`                                               |
 | C/C++             | `build-essential`, `clang`, `cmake`, `make`, `pkg-config` |
 | Zig               | Zig `0.15.2`                                              |
 | .NET/C#           | .NET SDK 8                                                |
@@ -158,6 +159,19 @@ binary_path = "target/release/my-rust-engine"
 ```
 
 If your engine has a `rust-toolchain.toml`, rustup will honor it. For engines pinned to a very different toolchain line, a custom image keeps builds more reproducible.
+
+### Go
+
+The published image includes Go `1.25.3`.
+
+```toml
+[[engines]]
+name = "my-go-engine"
+repo = "https://github.com/you/my-go-engine"
+branches = ["main"]
+build_cmd = "go build -o out/my-go-engine ./cmd/my-go-engine"
+binary_path = "out/my-go-engine"
+```
 
 ### Zig
 

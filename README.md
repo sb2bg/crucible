@@ -30,7 +30,7 @@ docker compose up -d
 
 The web dashboard opens at <http://localhost:8877>. If you bind the dashboard outside the container with `web_host = "0.0.0.0"`, Crucible requires a real `server.admin_token`.
 
-The published image includes common engine tools for Rust, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip. Haskell, unusual SDK versions, host-specific dependencies, and several incompatible runtimes are often easier with a local install; Docker can still work with a custom image or mounted toolchain. See [Docker](docs/docker.md) and [Engine runtimes](docs/engine-runtimes.md).
+The published image includes common engine tools for Rust, Go, C/C++, Zig, .NET/C#, Java/Maven, JavaScript/npm, and Python/pip. Haskell, unusual SDK versions, host-specific dependencies, and several incompatible runtimes are often easier with a local install; Docker can still work with a custom image or mounted toolchain. See [Docker](docs/docker.md) and [Engine runtimes](docs/engine-runtimes.md).
 
 With Cargo:
 
@@ -67,7 +67,7 @@ The web dashboard opens at <http://localhost:8877>. Pass `--tui` to launch the t
 - Regression hunts that narrow a good-to-bad range down to the first bad commit.
 - Release gates that compare a candidate and baseline against the same external gauntlet.
 - NNUE-style training data exported from self-play and from the regression tests the daemon already runs.
-- Multi-engine, multi-branch support, with experimental branches kept in their own lane.
+- Multi-engine, multi-branch support, with [experimental branches](docs/experiments.md) kept in their own lane.
 - Embedded web dashboard plus an optional terminal UI.
 - A single binary, SQLite storage, and no external services.
 
@@ -81,6 +81,7 @@ The web dashboard opens at <http://localhost:8877>. Pass `--tui` to launch the t
 - [Engine runtimes](docs/engine-runtimes.md)
 - [CLI commands](docs/commands.md)
 - [Scheduling](docs/scheduling.md)
+- [Experiments](docs/experiments.md)
 - [Regression hunts](docs/regression-hunts.md)
 - [Release gates](docs/release-gates.md)
 - [Training data](docs/training-data.md)

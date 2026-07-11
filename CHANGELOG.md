@@ -6,9 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-10
+
 ### Added
 
 - Go `1.26.2` to the default Docker engine toolchain image.
+- Optional fixed-game canonical progression matches via `testing.progression_games`, while experimental and manual patch tests continue to use SPRT.
+
+### Changed
+
+- Release gates now always play their full, color-balanced configured game count instead of stopping early on an SPRT boundary.
+
+### Fixed
+
+- Preserve the daemon environment when launching engine build commands, preventing Docker builds from losing `/usr/local/cargo/bin` and failing with `cargo: not found`.
+- Fail a job immediately when a game cannot be launched instead of repeating the same infrastructure error for the entire game budget.
 
 ## [0.1.1] - 2026-04-22
 
@@ -57,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Validate engine names and binary paths before storing or using them, and refuse build artifact copies or engine-data deletes outside managed repository directories.
 - Redact engine build commands and binary paths from the public engine API.
 
-[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/sb2bg/crucible/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/sb2bg/crucible/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/sb2bg/crucible/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sb2bg/crucible/releases/tag/v0.1.0

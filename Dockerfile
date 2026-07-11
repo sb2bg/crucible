@@ -86,6 +86,7 @@ COPY --from=builder /app/target/release/crucible /usr/local/bin/crucible
 WORKDIR /work
 RUN mkdir -p /work/.crucible && chown -R crucible:crucible /work /home/crucible "${RUSTUP_HOME}" "${CARGO_HOME}"
 USER crucible
+RUN cargo --version && rustc --version && go version && zig version
 EXPOSE 8877
 
 ENTRYPOINT ["crucible"]

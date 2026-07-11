@@ -306,10 +306,7 @@ impl GitManager {
         info!("Building commit {}...", short_hash(commit_hash));
 
         // Build commands are configured as arbitrary shell snippets.
-        let output = Command::new("sh")
-            .arg("-lc")
-            .arg(&self.build_cmd)
-            .current_dir(&self.local_path)
+        let output = build_shell_command(&self.build_cmd, &self.local_path)
             .output()
             .context("Failed to execute build command")?;
 
@@ -510,6 +507,14 @@ impl GitManager {
     }
 }
 
+fn build_shell_command(command: &str, current_dir: &Path) -> Command {
+    let mut shell = Command::new("sh");
+    // A login shell can replace the daemon's PATH (notably /usr/local/cargo/bin
+    // in the Docker image). Build commands need shell syntax, not a login session.
+    shell.arg("-c").arg(command).current_dir(current_dir);
+    shell
+}
+
 fn has_branch_wildcard(pattern: &str) -> bool {
     pattern.contains('*')
 }
@@ -548,4 +553,21 @@ pub fn branch_pattern_matches(pattern: &str, candidate: &str) -> bool {
     }
 
     pattern.ends_with('*') || remainder.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_shell_preserves_the_daemon_path() -> Result<()> {
+        let expected_path = "/crucible/toolchain:/usr/bin:/bin";
+        let output = build_shell_command("printf '%s' \"$PATH\"", Path::new("."))
+            .env("PATH", expected_path)
+            .output()?;
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout)?, expected_path);
+        Ok(())
+    }
 }

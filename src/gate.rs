@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::chess_rules::load_opening_book;
 use crate::config::{Config, GateProfileConfig};
-use crate::engine::match_runner::{run_match, MatchConfig};
+use crate::engine::match_runner::{run_match, MatchConfig, MatchStopRule};
 use crate::sprt::SprtBounds;
 use crate::sprt::{elo_error, los, wdl_to_elo};
 use crate::types::{Engine, EngineRevision, TestResult, TimeControl};
@@ -381,6 +381,7 @@ async fn run_gate_tasks(
                 time_control: time_control.clone(),
                 opening_book: opening_book.clone(),
                 sprt_bounds,
+                stop_rule: MatchStopRule::FixedGames,
                 max_games: games_per_opponent,
                 hash_mb: config.testing.hash_mb,
                 threads: config.testing.engine_threads,
@@ -401,6 +402,7 @@ async fn run_gate_tasks(
                 time_control: time_control.clone(),
                 opening_book: opening_book.clone(),
                 sprt_bounds,
+                stop_rule: MatchStopRule::FixedGames,
                 max_games: games_per_opponent,
                 hash_mb: config.testing.hash_mb,
                 threads: config.testing.engine_threads,
@@ -419,6 +421,7 @@ async fn run_gate_tasks(
             time_control: time_control.clone(),
             opening_book: opening_book.clone(),
             sprt_bounds,
+            stop_rule: MatchStopRule::FixedGames,
             max_games: games_per_opponent,
             hash_mb: config.testing.hash_mb,
             threads: config.testing.engine_threads,

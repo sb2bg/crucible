@@ -92,6 +92,9 @@ pub struct TestingConfig {
     /// How many games between each pair before giving up if SPRT is inconclusive
     #[serde(default = "default_max_games")]
     pub max_games: u32,
+    /// When set, canonical progression matches play exactly this many games
+    /// instead of stopping on an SPRT decision.
+    pub progression_games: Option<u32>,
     /// Hash size in MB for UCI engines
     #[serde(default = "default_hash_mb")]
     pub hash_mb: u32,
@@ -127,6 +130,7 @@ impl Default for TestingConfig {
             sprt: SprtConfig::default(),
             opening_book: None,
             max_games: default_max_games(),
+            progression_games: None,
             hash_mb: default_hash_mb(),
             engine_threads: default_engine_threads(),
             poll_interval_seconds: default_poll_interval_seconds(),
@@ -445,6 +449,7 @@ impl Config {
             server: ServerConfig::default(),
             testing: TestingConfig {
                 concurrency: 4,
+                progression_games: Some(200),
                 ..Default::default()
             },
             training: TrainingConfig::default(),
@@ -489,6 +494,16 @@ impl Config {
         }
         if self.testing.max_games == 0 {
             anyhow::bail!("testing.max_games must be at least 1");
+        }
+        if let Some(games) = self.testing.progression_games {
+            if games < 2 {
+                anyhow::bail!("testing.progression_games must be at least 2 when set");
+            }
+            if games % 2 != 0 {
+                anyhow::bail!(
+                    "testing.progression_games must be even so each opening uses both colors"
+                );
+            }
         }
         if self.testing.hash_mb == 0 {
             anyhow::bail!("testing.hash_mb must be at least 1");
@@ -535,6 +550,12 @@ impl Config {
             if profile.games_per_opponent == 0 {
                 anyhow::bail!(
                     "gate profile '{}' must set games_per_opponent to at least 1",
+                    profile.name
+                );
+            }
+            if profile.games_per_opponent % 2 != 0 {
+                anyhow::bail!(
+                    "gate profile '{}' games_per_opponent must be even so each opening uses both colors",
                     profile.name
                 );
             }
@@ -657,6 +678,31 @@ repo = "https://example.invalid/repo.git"
 branches = ["main"]
 build_cmd = "make"
 binary_path = "../engine"
+"#;
+        assert!(Config::parse(contents).is_err());
+    }
+
+    #[test]
+    fn progression_games_must_preserve_color_pairs() {
+        let mut config = Config::default();
+        config.testing.progression_games = Some(101);
+        assert!(config.validate().is_err());
+
+        config.testing.progression_games = Some(100);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn gate_games_must_preserve_color_pairs() {
+        let contents = r#"
+[[gate.opponents]]
+name = "Stockfish"
+binary_path = "/opt/engines/stockfish"
+
+[[gate.profiles]]
+name = "release"
+opponents = ["Stockfish"]
+games_per_opponent = 3
 "#;
         assert!(Config::parse(contents).is_err());
     }

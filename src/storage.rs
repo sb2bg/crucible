@@ -1542,6 +1542,7 @@ fn encode_sprt_result(value: SprtResult) -> &'static str {
         SprtResult::Inconclusive => "Inconclusive",
         SprtResult::H1Accepted => "H1Accepted",
         SprtResult::H0Accepted => "H0Accepted",
+        SprtResult::FixedGames => "FixedGames",
     }
 }
 
@@ -1550,6 +1551,7 @@ fn decode_sprt_result(value: &str) -> rusqlite::Result<SprtResult> {
         "Inconclusive" => Ok(SprtResult::Inconclusive),
         "H1Accepted" => Ok(SprtResult::H1Accepted),
         "H0Accepted" => Ok(SprtResult::H0Accepted),
+        "FixedGames" => Ok(SprtResult::FixedGames),
         other => Err(invalid_enum_error("SprtResult", other)),
     }
 }

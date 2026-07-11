@@ -3,7 +3,7 @@
 //! Supports concurrent games, opening books, and real-time
 //! SPRT evaluation to stop early when a result is conclusive.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cozy_chess::{util::parse_uci_move, Color, GameStatus};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,10 +69,49 @@ pub struct MatchConfig {
     pub time_control: TimeControl,
     pub opening_book: Option<Vec<String>>,
     pub sprt_bounds: SprtBounds,
+    pub stop_rule: MatchStopRule,
     pub max_games: u32,
     pub hash_mb: u32,
     pub threads: u32,
     pub cancel_flag: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchStopRule {
+    Sprt,
+    FixedGames,
+}
+
+impl MatchStopRule {
+    fn progress_result(
+        self,
+        wins: u32,
+        draws: u32,
+        losses: u32,
+        bounds: &SprtBounds,
+    ) -> SprtResult {
+        match self {
+            Self::Sprt => sprt::sprt_test(wins, draws, losses, bounds),
+            Self::FixedGames => SprtResult::Inconclusive,
+        }
+    }
+
+    fn should_stop_early(self, result: SprtResult) -> bool {
+        self == Self::Sprt && result != SprtResult::Inconclusive
+    }
+
+    fn completion_result(
+        self,
+        wins: u32,
+        draws: u32,
+        losses: u32,
+        bounds: &SprtBounds,
+    ) -> SprtResult {
+        match self {
+            Self::Sprt => sprt::sprt_test(wins, draws, losses, bounds),
+            Self::FixedGames => SprtResult::FixedGames,
+        }
+    }
 }
 
 /// Run a full match between dev and base engines
@@ -159,12 +198,16 @@ pub async fn run_match(
                     let _ = event_tx.send(MatchEvent::Error {
                         message: format!("Game {} failed: {}", game_number, e),
                     });
-                    continue;
+                    return Err(e).with_context(|| format!("Game {} failed", game_number));
                 }
             }
 
-            // Check SPRT after each game
-            let sprt_result = sprt::sprt_test(wins, draws, losses, &config.sprt_bounds);
+            // Fixed-length progression runs still publish live W/D/L and Elo, but do not
+            // turn an intermediate SPRT boundary crossing into a misleading verdict.
+            let sprt_result =
+                config
+                    .stop_rule
+                    .progress_result(wins, draws, losses, &config.sprt_bounds);
             let _ = event_tx.send(MatchEvent::SprtUpdate {
                 wins,
                 draws,
@@ -172,7 +215,7 @@ pub async fn run_match(
                 llr_status: sprt_result,
             });
 
-            if sprt_result != SprtResult::Inconclusive {
+            if config.stop_rule.should_stop_early(sprt_result) {
                 info!(
                     "SPRT concluded after {} games: {:?} (W:{} D:{} L:{})",
                     game_number, sprt_result, wins, draws, losses
@@ -186,8 +229,11 @@ pub async fn run_match(
         }
     }
 
-    // Max games reached without SPRT conclusion
-    let sprt_result = sprt::sprt_test(wins, draws, losses, &config.sprt_bounds);
+    // The game budget was reached without an early SPRT conclusion, or by design for
+    // a fixed-length progression match.
+    let sprt_result = config
+        .stop_rule
+        .completion_result(wins, draws, losses, &config.sprt_bounds);
     let result = build_test_result(wins, draws, losses, sprt_result, games);
     let _ = event_tx.send(MatchEvent::MatchCompleted {
         result: result.clone(),
@@ -576,6 +622,25 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
     use cozy_chess::Board;
+
+    #[test]
+    fn fixed_game_matches_never_stop_on_an_intermediate_sprt_decision() {
+        let bounds = SprtBounds {
+            min_games: 1,
+            ..SprtBounds::default()
+        };
+        let sprt_result = MatchStopRule::Sprt.progress_result(500, 400, 100, &bounds);
+        assert_eq!(sprt_result, SprtResult::H1Accepted);
+        assert!(MatchStopRule::Sprt.should_stop_early(sprt_result));
+
+        let fixed_result = MatchStopRule::FixedGames.progress_result(500, 400, 100, &bounds);
+        assert_eq!(fixed_result, SprtResult::Inconclusive);
+        assert!(!MatchStopRule::FixedGames.should_stop_early(fixed_result));
+        assert_eq!(
+            MatchStopRule::FixedGames.completion_result(500, 400, 100, &bounds),
+            SprtResult::FixedGames
+        );
+    }
 
     #[test]
     fn none_result_on_stalemate_is_draw() -> Result<()> {

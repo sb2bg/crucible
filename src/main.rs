@@ -14,13 +14,13 @@ use crucible::config::{
     validate_engine_storage_path, Config,
 };
 use crucible::engine::match_runner::{
-    run_match, MatchConfig, MatchEvent, TaggedTrainingSample, TrainingSampleSource,
+    run_match, MatchConfig, MatchEvent, MatchStopRule, TaggedTrainingSample, TrainingSampleSource,
 };
 use crucible::export::build_export_bundle;
 use crucible::gate::{
     default_gate_output_path, resolve_gate_profile, run_release_gate, write_gate_summary,
 };
-use crucible::git::{short_hash, GitManager};
+use crucible::git::{branch_pattern_matches, short_hash, GitManager};
 use crucible::scheduler::Scheduler;
 use crucible::sprt::SprtBounds;
 use crucible::sprt::{elo_error, los, wdl_to_elo};
@@ -997,6 +997,21 @@ fn configured_sprt_bounds(config: &Config, job_type: JobType) -> SprtBounds {
     }
 }
 
+fn configured_match_stop(config: &Config, engine: &Engine, job: &TestJob) -> (MatchStopRule, u32) {
+    let is_experimental = job.branch_context.as_deref().is_some_and(|branch| {
+        engine
+            .experimental_branches
+            .iter()
+            .any(|pattern| branch_pattern_matches(pattern, branch))
+    });
+    let is_canonical_progression = job.job_type == JobType::Sequential && !is_experimental;
+
+    match (is_canonical_progression, config.testing.progression_games) {
+        (true, Some(games)) => (MatchStopRule::FixedGames, games),
+        _ => (MatchStopRule::Sprt, config.testing.max_games),
+    }
+}
+
 async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Result<TestResult> {
     let engine = storage
         .get_engine_by_id(&job.engine_id)?
@@ -1016,6 +1031,7 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
         .binary_path
         .clone()
         .with_context(|| format!("Revision '{}' is missing a built binary", base_revision.id))?;
+    let (stop_rule, game_limit) = configured_match_stop(config, &engine, job);
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -1047,6 +1063,7 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
             &dev_revision,
             &base_revision,
             job,
+            game_limit,
         )?)
     } else {
         None
@@ -1074,7 +1091,8 @@ async fn execute_job(storage: &Storage, config: &Config, job: &TestJob) -> Resul
                     .or(config.testing.opening_book.as_deref()),
             )?,
             sprt_bounds: configured_sprt_bounds(config, job.job_type),
-            max_games: config.testing.max_games,
+            stop_rule,
+            max_games: game_limit,
             hash_mb: config.testing.hash_mb,
             threads: config.testing.engine_threads,
             cancel_flag: Some(cancel_flag),
@@ -1209,6 +1227,7 @@ fn build_regression_training_exports(
     dev_revision: &crucible::types::EngineRevision,
     base_revision: &crucible::types::EngineRevision,
     job: &TestJob,
+    games_requested: u32,
 ) -> Result<RegressionTrainingExports> {
     let time_control = job.time_control.to_string();
     let dev = TrainingRunWriter::begin(
@@ -1219,7 +1238,7 @@ fn build_regression_training_exports(
             revision_id: dev_revision.id.clone(),
             revision_hash: dev_revision.commit_hash.clone(),
             time_control: time_control.clone(),
-            games_requested: Some(config.testing.max_games),
+            games_requested: Some(games_requested),
             kind: TrainingRunKind::Regression,
             source_job_id: Some(job.id.clone()),
             source_role: Some("dev".to_string()),
@@ -1235,7 +1254,7 @@ fn build_regression_training_exports(
             revision_id: base_revision.id.clone(),
             revision_hash: base_revision.commit_hash.clone(),
             time_control,
-            games_requested: Some(config.testing.max_games),
+            games_requested: Some(games_requested),
             kind: TrainingRunKind::Regression,
             source_job_id: Some(job.id.clone()),
             source_role: Some("base".to_string()),
@@ -1268,7 +1287,9 @@ fn advance_bisect_after_job(
     let verdict = match result.sprt_result {
         crucible::types::SprtResult::H1Accepted => ProbeVerdict::Good,
         crucible::types::SprtResult::H0Accepted => ProbeVerdict::Bad,
-        crucible::types::SprtResult::Inconclusive => ProbeVerdict::Uncertain,
+        crucible::types::SprtResult::Inconclusive | crucible::types::SprtResult::FixedGames => {
+            ProbeVerdict::Uncertain
+        }
     };
     let action = bisect_runner.process_result(&mut session, &job.dev_revision_id, &job.id, verdict);
 
@@ -1316,4 +1337,68 @@ fn advance_bisect_after_job(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use crucible::types::{TestStatus, TimeControl};
+
+    fn engine_with_experiments() -> Engine {
+        Engine {
+            id: "engine-1".into(),
+            name: "engine".into(),
+            repo_url: "https://example.invalid/engine.git".into(),
+            local_path: PathBuf::from("/tmp/engine"),
+            branches: vec!["main".into()],
+            experimental_branches: vec!["exp/*".into()],
+            build_cmd: "make".into(),
+            binary_path: "engine".into(),
+            start_from: None,
+        }
+    }
+
+    fn job(job_type: JobType, branch: Option<&str>) -> TestJob {
+        TestJob {
+            id: "job-1".into(),
+            engine_id: "engine-1".into(),
+            dev_revision_id: "dev".into(),
+            base_revision_id: "base".into(),
+            branch_context: branch.map(str::to_string),
+            time_control: TimeControl::stc(),
+            opening_book: None,
+            status: TestStatus::Queued,
+            priority: 0,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            job_type,
+        }
+    }
+
+    #[test]
+    fn fixed_games_apply_only_to_canonical_progression() {
+        let mut config = Config::default();
+        config.testing.progression_games = Some(200);
+        let engine = engine_with_experiments();
+
+        assert_eq!(
+            configured_match_stop(&config, &engine, &job(JobType::Sequential, Some("main"))),
+            (MatchStopRule::FixedGames, 200)
+        );
+        assert_eq!(
+            configured_match_stop(
+                &config,
+                &engine,
+                &job(JobType::Sequential, Some("exp/search"))
+            ),
+            (MatchStopRule::Sprt, config.testing.max_games)
+        );
+        assert_eq!(
+            configured_match_stop(&config, &engine, &job(JobType::Manual, None)),
+            (MatchStopRule::Sprt, config.testing.max_games)
+        );
+    }
 }

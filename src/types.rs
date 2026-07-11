@@ -179,6 +179,8 @@ pub enum SprtResult {
     H1Accepted,
     /// H0 accepted: the change is likely not an improvement
     H0Accepted,
+    /// The configured fixed game count completed; inspect Elo and its error bar
+    FixedGames,
 }
 
 /// A single game record

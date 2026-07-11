@@ -26,7 +26,7 @@ If `server.admin_token` is set, the Admin tab prompts for the token and stores i
 
 [![Jobs tab](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)](https://github.com/sb2bg/crucible/blob/main/assets/jobs.png?raw=true)
 
-The Jobs tab is the working view. Each row is one SPRT match between a dev and a base commit, with live W/D/L, an Elo estimate and error bar, and the current SPRT verdict. Running matches update in place as games complete.
+The Jobs tab is the working view. Each row is one match between a dev and a base commit, with live W/D/L, an Elo estimate and error bar, and the stopping-rule result. Fixed-length progression runs show `FixedGames`; SPRT jobs show their hypothesis verdict. Running matches update in place as games complete.
 
 ## The terminal UI
 

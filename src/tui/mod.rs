@@ -1,6 +1,6 @@
 //! Terminal UI for monitoring Crucible in real-time.
 //!
-//! Shows live game progress, SPRT status, Elo timeline,
+//! Shows live game progress, match results, Elo timeline,
 //! and job queue — all in the terminal.
 
 use anyhow::Result;
@@ -201,7 +201,7 @@ impl Tui {
     fn draw_jobs(&self, frame: &mut Frame, area: Rect) {
         let jobs = self.storage.list_recent_jobs(12).unwrap_or_default();
         let header = Row::new(vec![
-            "Status", "Engine", "Dev", "Base", "W/D/L", "Elo", "SPRT",
+            "Status", "Engine", "Dev", "Base", "W/D/L", "Elo", "Result",
         ])
         .style(Style::default().fg(Color::Yellow).bold());
 

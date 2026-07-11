@@ -24,7 +24,7 @@ The dashboard hides experimental jobs from the Timeline and Jobs views and surfa
 
 ## Concurrency
 
-`testing.concurrency` controls how many matches run in parallel. The daemon spawns up to that many worker tasks. Each worker claims the next-highest-priority job from the queue and holds onto it until the SPRT concludes or the match hits `testing.max_games`.
+`testing.concurrency` controls how many matches run in parallel. The daemon spawns up to that many worker tasks. Each worker claims the next-highest-priority job from the queue and holds onto it until the SPRT concludes or the match hits `testing.max_games`. If `testing.progression_games` is set, canonical sequential jobs instead play exactly that many games; experimental and manual patch tests remain SPRT-based.
 
 If `training.idle_selfplay` is enabled, worker slots that cannot find a test job pick up a short self-play batch instead, so the machine keeps producing training data during quiet periods.
 

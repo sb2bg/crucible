@@ -6,6 +6,7 @@ web_host = "127.0.0.1"     # use "0.0.0.0" with admin_token in Docker
 [testing]
 concurrency = 4            # Test jobs to run in parallel
 max_games = 10000          # Max games per test before giving up
+progression_games = 200    # Fixed games for canonical history (omit to use SPRT)
 hash_mb = 16               # Hash table size for engines
 engine_threads = 1         # Threads per engine instance
 

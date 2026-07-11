@@ -62,7 +62,7 @@ The web dashboard opens at <http://localhost:8877>. Pass `--tui` to launch the t
 
 ## Features
 
-- Continuous SPRT testing of every new commit against its predecessor.
+- Continuous commit-to-commit testing, with fixed-game Elo progression or SPRT stopping.
 - Elo timeline with confidence intervals and highlighted tagged releases.
 - Regression hunts that narrow a good-to-bad range down to the first bad commit.
 - Release gates that compare a candidate and baseline against the same external gauntlet.

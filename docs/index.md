@@ -12,7 +12,7 @@ Most chess engine testing platforms, such as [OpenBench](https://github.com/Andy
 
 ## What it does
 
-- Tests every new commit against the one before it, stopping as soon as SPRT reaches a verdict.
+- Tests every new commit against the one before it, using fixed-game Elo progression or SPRT stopping.
 - Tracks several engines and branches at the same time and keeps experimental branches in their own lane.
 - Prioritises branch heads and tagged releases, then backfills the rest of the history in the background.
 - Hunts regressions by sampling a known-good to known-bad range and narrowing in on the first bad window.

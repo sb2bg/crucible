@@ -29,7 +29,7 @@ Crucible is a single Rust binary. Everything it needs, including the dashboard, 
 2. **Build.** When a new commit is picked up, a worker checks it out and runs the engine's build command in the cloned repo.
 3. **Schedule.** The scheduler decides which pair of revisions to test next, using the priorities described in [Scheduling](scheduling.md).
 4. **Test.** A worker plays a match between the two revisions, streaming games into SQLite as they finish.
-5. **Analyse.** SPRT is evaluated after every game. When it accepts a hypothesis, or the match hits `max_games`, the worker records the Elo estimate, error, and LOS, and releases the slot.
+5. **Analyse.** Patch tests evaluate SPRT after every game and stop when it accepts a hypothesis or reaches `max_games`. Canonical progression tests use the fixed `progression_games` budget when configured. Either path records the Elo estimate, error, and LOS before releasing the slot.
 6. **Repeat.** The daemon never stops. New commits are picked up on the next poll, and the Timeline rolls forward.
 
 ## Storage layout

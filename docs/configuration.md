@@ -21,6 +21,7 @@ web_host = "127.0.0.1"    # use "0.0.0.0" in Docker
 [testing]
 concurrency = 4
 max_games = 10000
+progression_games = 200
 hash_mb = 16
 engine_threads = 1
 poll_interval_seconds = 60
@@ -87,14 +88,17 @@ Crucible refuses to start with common placeholder tokens such as `changeme`, `ch
 
 ## `[testing]`
 
-| Field                   | Default | Notes                                                                              |
-| ----------------------- | ------- | ---------------------------------------------------------------------------------- |
-| `concurrency`           | `1`     | Number of test jobs that run in parallel.                                          |
-| `max_games`             | `10000` | Maximum games per SPRT match before the test gives up as inconclusive.             |
-| `hash_mb`               | `16`    | Hash table size passed to every engine instance (`setoption name Hash value ...`). |
-| `engine_threads`        | `1`     | Threads per engine instance (`setoption name Threads value ...`).                  |
-| `poll_interval_seconds` | `60`    | How often the daemon fetches new commits and schedules fresh jobs.                 |
-| `opening_book`          | unset   | Path to an EPD opening suite containing one position per line (see below).         |
+| Field                   | Default | Notes                                                                                                      |
+| ----------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `concurrency`           | `1`     | Number of test jobs that run in parallel.                                                                  |
+| `max_games`             | `10000` | Maximum games per SPRT match before the test gives up as inconclusive.                                     |
+| `progression_games`     | unset   | Fixed game count for canonical sequential history. Must be even; when unset, these matches also use SPRT.  |
+| `hash_mb`               | `16`    | Hash table size passed to every engine instance (`setoption name Hash value ...`).                         |
+| `engine_threads`        | `1`     | Threads per engine instance (`setoption name Threads value ...`).                                          |
+| `poll_interval_seconds` | `60`    | How often the daemon fetches new commits and schedules fresh jobs.                                         |
+| `opening_book`          | unset   | Path to an EPD opening suite containing one position per line (see below).                                 |
+
+Set `progression_games` when the Timeline is primarily an Elo-estimation view. Canonical commit-to-commit matches then play the same number of color-balanced games and finish with a `FixedGames` result. Experimental branches, manual patch tests, and regression hunts continue to use SPRT, where an early hypothesis decision is the useful outcome.
 
 The opening book is a plain text EPD file. Each non-empty, non-comment line must contain an EPD position: the first four FEN fields, followed by optional semicolon-terminated EPD operations. Lines beginning with `#` are ignored. Crucible honors `hmvc` and `fmvn` operations when present, defaulting them to `0` and `1` otherwise. Other EPD operations such as `bm` and `id` are accepted as metadata but are not used by the match runner.
 
@@ -158,7 +162,7 @@ Each `[[gate.profiles]]` entry defines a named gauntlet.
 | -------------------- | ------- | ---------------------------------------------------------------------------------------- |
 | `name`               | -       | Short name passed to `crucible gate --profile`.                                          |
 | `opponents`          | -       | List of opponent names defined in `[[gate.opponents]]`.                                  |
-| `games_per_opponent` | `100`   | Games played against each opponent by both the candidate and the baseline.               |
+| `games_per_opponent` | `100`   | Even game count played against each opponent by both candidate and baseline.              |
 | `min_score_delta`    | `0.0`   | Minimum score-percentage delta, candidate minus baseline, required for a `Pass` verdict. |
 | `opening_book`       | unset   | Optional per-profile opening book, overrides `testing.opening_book` during the gate.     |
 | `time_control`       | unset   | Optional per-profile time control, overrides `testing.time_control` during the gate.     |

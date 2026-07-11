@@ -104,7 +104,7 @@ If you installed or built the binary locally, start the continuous testing loop:
 crucible run
 ```
 
-The daemon clones the repository, enumerates commits on the tracked branches, builds each one with your build command, and schedules SPRT matches between consecutive commits. The web dashboard opens at <http://localhost:8877> by default.
+The daemon clones the repository, enumerates commits on the tracked branches, builds each one with your build command, and schedules matches between consecutive commits. With `progression_games` set, canonical history uses equal fixed-game samples for a more comparable Elo timeline; experimental branches and manual patch tests use SPRT. The web dashboard opens at <http://localhost:8877> by default.
 
 Pass `--tui` to the same command to launch the terminal UI alongside the daemon, or run `crucible monitor` in another shell to attach a TUI to an already running instance.
 

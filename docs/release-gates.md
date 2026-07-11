@@ -52,7 +52,7 @@ The output is a JSON file under `data_dir/gates/` by default, or at `--output <p
 
 - Candidate vs suite: wins, draws, losses, score percentage, Elo diff with standard error, and LOS.
 - Baseline vs suite: the same fields.
-- Head-to-head candidate vs baseline: the same fields plus the final SPRT verdict.
+- Head-to-head candidate vs baseline: the same fields after the full fixed game count.
 - Aggregate score delta in percentage points (candidate minus baseline).
 - Verdict: `Pass`, `Fail`, or `Tie`, decided by comparing the score delta to `min_score_delta`.
 
